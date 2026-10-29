@@ -173,6 +173,93 @@ function markContextCompacted(res) {
 
 // === Per-Agent Session Store ===
 const sessions = new Map();  // keyed by agent ID (from `user` field)
+const SESSIONS_FILE_PATH = path.join(__dirname, 'data', 'sessions.json');
+const MAX_SESSION_FILE_BYTES = 50 * 1024 * 1024; // 50 MB
+
+function ensureSessionsDir() {
+    const dir = path.dirname(SESSIONS_FILE_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function serializeSessions() {
+    const out = {};
+    for (const [agentId, session] of sessions.entries()) {
+        if (!session || session.messageCount === 0) continue;
+        out[agentId] = {
+            id: session.id || null,
+            parentMessageId: session.parentMessageId || null,
+            createdAt: session.createdAt || null,
+            messageCount: session.messageCount || 0,
+            accountId: session.accountId || null,
+            history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
+            sentSystemFingerprint: session.sentSystemFingerprint || null,
+            lastActivityAt: session.lastActivityAt || Date.now(),
+        };
+    }
+    return out;
+}
+
+let saveSessionsTimer = null;
+function saveSessions() {
+    try {
+        if (saveSessionsTimer) clearTimeout(saveSessionsTimer);
+        saveSessionsTimer = setTimeout(() => {
+            try {
+                ensureSessionsDir();
+                const data = serializeSessions();
+                const json = JSON.stringify(data, null, 2);
+                fs.writeFileSync(SESSIONS_FILE_PATH, json, 'utf8');
+                console.log(`[DS-API] Saved ${Object.keys(data).length} session(s) to disk`);
+            } catch (e) {
+                console.error(`[DS-API] Failed to save sessions: ${e.message}`);
+            } finally {
+                saveSessionsTimer = null;
+            }
+        }, 1000);
+    } catch (e) {
+        console.error(`[DS-API] Failed to schedule session save: ${e.message}`);
+    }
+}
+
+function loadSessions() {
+    try {
+        if (!fs.existsSync(SESSIONS_FILE_PATH)) return;
+        const raw = fs.readFileSync(SESSIONS_FILE_PATH, 'utf8');
+        const data = JSON.parse(raw);
+        const now = Date.now();
+        const entries = Object.entries(data);
+        const maxSessions = 500;
+        // Sort by most recent activity first
+        entries.sort((a, b) => (b[1].lastActivityAt || 0) - (a[1].lastActivityAt || 0));
+        let loaded = 0;
+        for (const [agentId, session] of entries) {
+            if (loaded >= maxSessions) {
+                console.log(`[DS-API] Session limit reached (${maxSessions}), skipping older sessions`);
+                break;
+            }
+            if (!session || typeof session !== 'object') continue;
+            const idleMs = now - (session.lastActivityAt || 0);
+            if (idleMs > SESSION_TTL_MS * 2) {
+                console.log(`[DS-API] Skipping stale session ${agentId}: idle ${Math.round(idleMs / 60000)}m`);
+                continue;
+            }
+            sessions.set(agentId, {
+                id: session.id || null,
+                parentMessageId: session.parentMessageId || null,
+                createdAt: session.createdAt || null,
+                messageCount: session.messageCount || 0,
+                accountId: session.accountId || null,
+                history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
+                sentSystemFingerprint: session.sentSystemFingerprint || null,
+                lastActivityAt: session.lastActivityAt || now,
+            });
+            loaded++;
+        }
+        console.log(`[DS-API] Loaded ${loaded} session(s) from disk (max ${maxSessions})`);
+    } catch (e) {
+        console.error(`[DS-API] Failed to load sessions: ${e.message}`);
+    }
+}
 
 // Unkeyed clients must NOT collapse into a single shared bucket. The old loopback fallback
 // ('dev-agent') silently merged Hermes, OpenCode and ad-hoc scripts into ONE DeepSeek chat.
@@ -190,14 +277,25 @@ function unkeyedAgentId(remoteAddr, userAgent) {
     }
     return id;
 }
-const MAX_HISTORY_LENGTH = 15;
-const MAX_HISTORY_CHARS = 10000;
+const MAX_HISTORY_LENGTH = 100;
+// Replay history budget. 100k chars was roughly a quarter of a real coding
+// session, so the transcript handed back to a reset session was too thin to
+// resume from. Raised to 400k (well inside the 800k upstream prompt cap) and
+// paired with per-entry caps so one huge paste cannot evict everything else.
+const MAX_HISTORY_CHARS = 400000;
+const HISTORY_ENTRY_PROMPT_CHARS = 12000;
+const HISTORY_ENTRY_ASSISTANT_CHARS = 12000;
 const MAX_MESSAGE_DEPTH = 100;  // auto-reset after this many messages
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;  // 2 hours
 
 // === DeepSeek Web API Config — loaded from external config file ===
 const DS_CONFIG_PATH = process.env.DEEPSEEK_AUTH_PATH || path.join(__dirname, 'deepseek-auth.json');
 const ACCOUNTS_DIR = process.env.DEEPSEEK_AUTH_DIR || path.join(__dirname, 'accounts');
+// DeepSeek Web throttles a browser session with "Слишком частые сообщения" for
+// minutes, not seconds. A 10s cooldown retried the same login while it was still
+// throttled, which is how a soft rate limit turns into a hard one. Ten minutes
+// matches the message the upstream actually sends; override with
+// DEEPSEEK_ACCOUNT_COOLDOWN_MS when running against a friendlier endpoint.
 const DEFAULT_ACCOUNT_COOLDOWN_MS = envNumber('DEEPSEEK_ACCOUNT_COOLDOWN_MS', 10 * 60 * 1000);
 let DS_CONFIG = {};
 let dsHeaders = {};
@@ -217,10 +315,12 @@ const MIN_UPSTREAM_PROMPT_CHARS = 16000;
 const CONTEXT_OVERFLOW_MIN_CHARS = 8000;
 const MAX_OVERFLOW_RETRIES = 3;
 const INSTANT_EMPTY_MS = 1500;
+const AUTO_COMPACT_RATIO = 0.90; // compact when prompt exceeds 85% of max
+const AUTO_COMPACT_MIN_CHARS = 20000;
 const configuredPromptChars = Number(process.env.DEEPSEEK_MAX_PROMPT_CHARS);
 const MAX_UPSTREAM_PROMPT_CHARS = Number.isFinite(configuredPromptChars)
     ? Math.max(MIN_UPSTREAM_PROMPT_CHARS, Math.floor(configuredPromptChars))
-    : 80000;
+    : 800000;
 function buildBaseHeaders(config = DS_CONFIG) {
     return {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
@@ -1420,8 +1520,50 @@ function noToolsRepairPrompt() {
 
 const NO_TOOLS_CONTRACT = '\n\n[NO-TOOLS CONTRACT] This request does NOT support tool calls. Do NOT use any tools, tool markup, DSML, or tool-call JSON. Respond with a plain text final answer only. Do not attempt to call write_file, terminal, or any other tool. Do not emit any JSON resembling a tool request.';
 
-function noToolsContract() {
-    return NO_TOOLS_CONTRACT;
+// Escape hatch for prompt-shaped guard rails.
+//
+// Two blocks are appended to the upstream prompt and both constrain what the
+// model may output: NO-TOOLS CONTRACT (no tools, plain text only) and TOOL
+// REMINDER (which also says "do not paste source files or diffs"). That last
+// line is actively wrong for a pure refactor request: the answer *is* the
+// source, and a model told not to paste files can only describe changes in
+// prose.
+//
+// DEEPSEEK_GUARD_BLOCKS=off drops the prohibitions. It does NOT drop the
+// {"tool_call":...} envelope when tools are advertised: that envelope is a
+// parsing contract, not a style rule, and removing it while tools are on turns
+// valid answers into malformed_tool_call failures. So "off" means "stop telling
+// the model what it may not write", not "stop telling it the wire format".
+//
+// Default is on. Recovery prompts (the "strict instruction" retries) are not
+// affected - they only run after a failure and exist to rescue the request.
+function guardBlocksEnabled(env = process.env) {
+    const raw = env ? env.DEEPSEEK_GUARD_BLOCKS : undefined;
+    if (raw === undefined || raw === null || String(raw).trim() === '') return true;
+    return !['off', '0', 'false', 'no', 'none', 'disabled'].includes(String(raw).trim().toLowerCase());
+}
+
+// Per-request override, so a single refactor call can relax the prohibitions
+// without weakening every other request the proxy serves. Header wins over env.
+function resolveGuardBlocks(rawParams, headers = {}) {
+    const headerValue = headers ? headers['x-deepseek-guard-blocks'] : undefined;
+    if (headerValue !== undefined && headerValue !== null && String(headerValue).trim() !== '') {
+        return !['off', '0', 'false', 'no', 'none', 'disabled'].includes(String(headerValue).trim().toLowerCase());
+    }
+    if (rawParams && rawParams.guard_blocks !== undefined) {
+        const raw = rawParams.guard_blocks;
+        if (raw === false) return false;
+        if (raw === true) return true;
+        if (typeof raw === 'string' && raw.trim() !== '') {
+            return !['off', '0', 'false', 'no', 'none', 'disabled'].includes(raw.trim().toLowerCase());
+        }
+    }
+    return guardBlocksEnabled();
+}
+
+function noToolsContract(enabled) {
+    const on = enabled === undefined ? guardBlocksEnabled() : Boolean(enabled);
+    return on ? NO_TOOLS_CONTRACT : '';
 }
 
 function effectiveToolsForRequest(rawParams, webAccess) {
@@ -1732,9 +1874,21 @@ function toolFunctionNames(tools) {
     return names;
 }
 
-function formatToolReminder(tools) {
+function formatToolReminder(tools, options = {}) {
     const names = toolFunctionNames(tools);
     if (!names.length) return '';
+    const guardsOn = options.guards === undefined ? guardBlocksEnabled() : Boolean(options.guards);
+    // With the prohibitions off, keep only the wire format. The envelope is how
+    // the proxy recognises a tool request; the prohibitions are what stop the
+    // model from writing code, so those are the part that has to go.
+    if (!guardsOn) {
+        return [
+            '--- TOOL FORMAT ---',
+            'This computer: output only {"tool_call":{"name":"<function_name>","arguments":{...}}} or {"tool_calls":[{"name":"<function_name>","arguments":{...}}]}.',
+            `Available tools: ${names.join(', ')}`,
+            '--- END TOOL FORMAT ---',
+        ].join('\n');
+    }
     return [
         '--- TOOL REMINDER ---',
         'Web: answer in text. DeepSeek Search is already on. Do not use bash or curl for the web.',
@@ -1744,8 +1898,8 @@ function formatToolReminder(tools) {
     ].join('\n');
 }
 
-function pinToolReminder(promptText, tools, maxChars = MAX_UPSTREAM_PROMPT_CHARS) {
-    const reminder = formatToolReminder(tools);
+function pinToolReminder(promptText, tools, maxChars = MAX_UPSTREAM_PROMPT_CHARS, options = {}) {
+    const reminder = formatToolReminder(tools, options);
     if (!reminder) return String(promptText || '');
     return appendPromptInstruction(promptText, reminder, maxChars);
 }
@@ -2886,9 +3040,13 @@ function storeHistory(agentId, prompt, content, toolCall) {
     const assistantResponse = calls.length
         ? calls.map(call => `TOOL_CALL: ${call.name}\narguments: ${call.arguments}`).join('\n')
         : content;
-    // Save last 500 chars of the prompt for history context
-    const shortPrompt = prompt.length > 500 ? '...' + prompt.substring(prompt.length - 500) : prompt;
-    session.history.push({ user: shortPrompt, assistant: assistantResponse });
+    // Replay history keeps the whole user prompt, not a 500-char tail: a prompt
+    // cut mid-sentence is what made replayed sessions read like a different
+    // task and invited the model to invent the missing part. Bounded per entry
+    // so one giant paste cannot crowd out the rest of the transcript.
+    const storedPrompt = contextLib.boundHistoryText(prompt, HISTORY_ENTRY_PROMPT_CHARS);
+    const storedAssistant = contextLib.boundHistoryText(assistantResponse, HISTORY_ENTRY_ASSISTANT_CHARS);
+    session.history.push({ user: storedPrompt, assistant: storedAssistant });
     while (session.history.length > MAX_HISTORY_LENGTH) session.history.shift();
     let historyChars = session.history.reduce((sum, e) => sum + e.user.length + e.assistant.length, 0);
     while (historyChars > MAX_HISTORY_CHARS && session.history.length > 1) {
@@ -2941,46 +3099,24 @@ function extractScreenshotPaths(messages) {
 
 const PROMPT_COMPACTION_MARKER = '\n\n[Earlier context compacted by FreeDeepseekAPI]\n\n';
 
+// Structured compaction lives in lib/context.js: it condenses turns (keeping
+// paths, commands and errors) and attaches an explicit notice instead of
+// cutting a silent hole the model would fill with invention.
+const contextLib = require('./lib/context');
+
 function truncatePromptMiddle(text, maxChars, headRatio = 0.35) {
-    const value = String(text || '');
-    if (value.length <= maxChars) return value;
-    if (maxChars <= 0) return '';
-    if (maxChars <= PROMPT_COMPACTION_MARKER.length) return value.substring(value.length - maxChars);
-    const payloadChars = maxChars - PROMPT_COMPACTION_MARKER.length;
-    const headChars = Math.max(0, Math.min(payloadChars, Math.floor(payloadChars * headRatio)));
-    const tailChars = payloadChars - headChars;
-    return value.substring(0, headChars) + PROMPT_COMPACTION_MARKER + value.substring(value.length - tailChars);
+    return contextLib.truncateMiddle(text, maxChars, headRatio);
 }
 
 function splitConversationTurns(text) {
-    const value = String(text || '');
-    if (!value) return [];
-    return value.split(/(?=^User: |^Assistant: |^\[Tool Result\])/m).filter(Boolean);
+    return contextLib.splitTurns(text);
 }
 
 function compactConversation(conversation, maxChars) {
     const value = String(conversation || '');
     if (value.length <= maxChars) return value;
-    const turns = splitConversationTurns(value);
-    if (turns.length <= 1) return truncatePromptMiddle(value, maxChars, 0.25);
-
-    const joinedLength = (items) => items.reduce((sum, turn) => sum + turn.length, 0);
-    const perToolCap = Math.max(4000, Math.floor(maxChars * 0.25));
-    let next = turns.map((turn) => {
-        if (!/^\[Tool Result\]/.test(turn) || turn.length <= perToolCap) return turn;
-        return truncatePromptMiddle(turn, perToolCap, 0.2);
-    });
-    if (joinedLength(next) <= maxChars) return next.join('');
-
-    // Drop the oldest middle turns first so the original task and the latest
-    // tool loop stay intact. A single middle-out slice through 300k of file
-    // reads is what makes long Hermes sessions stop calling tools.
-    while (next.length > 2 && joinedLength(next) > maxChars) {
-        next.splice(1, 1);
-    }
-    const joined = next.join('');
-    if (joined.length <= maxChars) return joined;
-    return truncatePromptMiddle(joined, maxChars, 0.25);
+    const result = contextLib.structuredCompact(value, maxChars);
+    return result.text;
 }
 
 function hasExplicitConversationHistory(messages) {
@@ -2990,11 +3126,24 @@ function hasExplicitConversationHistory(messages) {
 
 function buildRecoveryHistoryPrefix(history) {
     if (!Array.isArray(history) || history.length === 0) return '';
-    let prefix = '[Previous conversation]\n';
+    // Tell the model what this block is. Presented as plain transcript, a
+    // rebuilt session reads as complete history, and the model happily "recalls"
+    // turns that were never replayed. Labelling it a recovered record is what
+    // keeps it honest about gaps.
+    let prefix = '[Recovered record of this conversation from an earlier session. Long entries below were shortened.]\n'
+        + '[Treat it as a summary of what already happened, not as verbatim text: do not quote it as exact wording and do not assume it is complete.]\n\n';
     for (const exchange of history) {
         prefix += `User: ${String(exchange?.user || '')}\nAssistant: ${String(exchange?.assistant || '')}\n\n`;
     }
     return prefix + '[Continue from here]\n\n';
+}
+
+function autoCompactIfNeeded(promptText, maxChars) {
+    if (!promptText || promptText.length <= maxChars * AUTO_COMPACT_RATIO) return promptText;
+    const result = contextLib.structuredCompact(promptText, maxChars);
+    if (!result.compacted) return promptText;
+    console.log(`[DS-API] Auto-compacted prompt ${promptText.length} -> ${result.text.length} chars (limit ${maxChars}, condensed ${result.condensedTurns} turn(s), dropped ${result.droppedTurns})`);
+    return result.text;
 }
 
 function buildBoundedPrompt(systemPrompt, historyPrefix, conversationPrompt, maxChars = MAX_UPSTREAM_PROMPT_CHARS) {
@@ -3031,13 +3180,23 @@ function buildBoundedPrompt(systemPrompt, historyPrefix, conversationPrompt, max
     let bounded = boundedSystem && boundedConversation
         ? `${boundedSystem}\n\n${boundedConversation}`
         : (boundedSystem || boundedConversation);
-    if (bounded.length > safeMax) bounded = bounded.substring(0, safeMax);
+    let autoCompacted = false;
+    if (bounded.length > safeMax) {
+        const compacted = autoCompactIfNeeded(bounded, safeMax);
+        if (compacted !== bounded) {
+            bounded = compacted;
+            autoCompacted = true;
+        } else {
+            bounded = bounded.substring(0, safeMax);
+        }
+    }
     return {
         prompt: bounded,
         compacted: true,
         historyDropped,
         originalChars: original.length,
         promptChars: bounded.length,
+        autoCompacted,
     };
 }
 
@@ -3143,7 +3302,7 @@ function formatMessages(messages, tools, options = {}) {
     }
     systemPrompt += formatToolDefinitions(tools);
     if (options.nativeSearchNotice) systemPrompt += nativeSearchAndThinkNotice();
-    if (options.noTools) systemPrompt += noToolsContract();
+    if (options.noTools) systemPrompt += noToolsContract(options.guards);
 
     // Build full conversation history for DeepSeek's context
     let conversation = '';
@@ -3205,8 +3364,9 @@ function resolveUpstreamPrompt(session, messages, tools, recoveryHistoryPrefix =
     const omitSystem = remoteLive && Boolean(session.sentSystemFingerprint);
     const delta = continuationMessages(messages);
     let conversation = remoteLive ? formatMessages(delta, [], options).prompt : formatted.prompt;
-    if (options.noTools && omitSystem) {
-        conversation = appendPromptInstruction(conversation, noToolsContract());
+    const noToolsGuard = options.noTools ? noToolsContract(options.guards) : '';
+    if (noToolsGuard && omitSystem) {
+        conversation = appendPromptInstruction(conversation, noToolsGuard);
     }
     return {
         systemPrompt: omitSystem ? '' : formatted.systemPrompt,
@@ -4483,7 +4643,8 @@ const server = http.createServer(async (req, res) => {
             const effectiveTools = effectiveToolsForRequest(rawParams, webAccess);
             const tools = effectiveTools;
             const requestNoToolsMode = isNoToolsRequest(rawParams, effectiveTools);
-            const promptOptions = { nativeSearchNotice: webAccess.nativeSearchNotice, noTools: requestNoToolsMode };
+            const guardBlocksOn = resolveGuardBlocks(rawParams, req.headers);
+            const promptOptions = { nativeSearchNotice: webAccess.nativeSearchNotice, noTools: requestNoToolsMode, guards: guardBlocksOn };
             logRow.model = requestedModel;
             const remoteAddr = req.socket.remoteAddress || 'unknown';
             const requestedSession = req.headers['x-agent-session'] || params.session || params.user;
@@ -4491,6 +4652,9 @@ const server = http.createServer(async (req, res) => {
                 ? String(requestedSession)
                 : unkeyedAgentId(remoteAddr, req.headers['user-agent']);
             const agentTag = `[${agentId}]`;
+            if (!guardBlocksOn) {
+                console.log(`${agentTag} Guard blocks relaxed for this request (no NO-TOOLS CONTRACT / no "do not paste source" rule).`);
+            }
             activeAgentId = agentId;
             lockHolder.agentId = agentId;
             // Optional: serve this request with one named login (the dashboard account switcher).
@@ -4604,9 +4768,10 @@ const server = http.createServer(async (req, res) => {
             const historyPrefix = resolved.historyPrefix;
 
             const promptBuild = buildBoundedPrompt(resolved.systemPrompt, historyPrefix, resolved.conversation);
+            if (promptBuild.autoCompacted) markContextCompacted(res);
             const freshPromptBuild = buildBoundedPrompt(systemPrompt, recoveryHistoryPrefix, prompt);
-            let fullPrompt = pinToolReminder(promptBuild.prompt, tools);
-            const freshPrompt = pinToolReminder(freshPromptBuild.prompt, tools);
+            let fullPrompt = pinToolReminder(promptBuild.prompt, tools, MAX_UPSTREAM_PROMPT_CHARS, promptOptions);
+            const freshPrompt = pinToolReminder(freshPromptBuild.prompt, tools, MAX_UPSTREAM_PROMPT_CHARS, promptOptions);
             let promptCompacted = promptBuild.compacted;
             if (!resolved.omittedSystem) session.sentSystemFingerprint = resolved.fingerprint;
             if (resolved.omittedSystem || resolved.omittedPriorTurns) {
@@ -4767,6 +4932,31 @@ const server = http.createServer(async (req, res) => {
                     imageContext.refFileIds.length = 0;
                     console.log(`${agentTag} account ${failedAccountId} rate-limited; failing over (hop ${hop + 1}).`);
                 }
+                // Pool-wide cooldown: preserve context and retry up to 3 times
+                // with short 1s delays instead of waiting for the full cooldown.
+                if (isAccountRateLimitError(lastError) && accounts.length > 0 && !clientGone && !deadlineHit()) {
+                    const maxQuickRetries = 3;
+                    for (let retry = 1; retry <= maxQuickRetries; retry++) {
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        if (clientGone || deadlineHit()) throw lastError;
+                        const nextReady = accounts
+                            .filter(a => accountHasCredentials(a) && isAccountEnabled(a))
+                            .sort((a, b) => (a.cooldownUntil || 0) - (b.cooldownUntil || 0))[0];
+                        if (!nextReady) break;
+                        console.log(`${agentTag} all accounts cooling down; quick retry ${retry}/${maxQuickRetries} with ${nextReady.id}`);
+                        try {
+                            const call = await askDeepSeekStream(promptText, agentId, requestedModel, recoveryPrompt, lockHolder, imageContext, webFlags);
+                            const result = await readDeepSeekResponse(call.resp.body, call.account);
+                            if (!result.rateLimited) {
+                                return { call, result, elapsedMs: Date.now() - hopStarted };
+                            }
+                            lastError = result.rateLimitError;
+                        } catch (e) {
+                            if (!isAccountRateLimitError(e)) throw e;
+                            lastError = e;
+                        }
+                    }
+                }
                 throw lastError;
             }
 
@@ -4849,12 +5039,14 @@ const server = http.createServer(async (req, res) => {
                 const retryBuild = keepSession
                     ? null
                     : buildRetryPrompt(systemPrompt, recoveryHistoryPrefix, prompt, fullPrompt, retryBudget);
+                if (retryBuild?.autoCompacted) markContextCompacted(res);
                 const retryPrompt = keepSession
                     ? emptyResponseNudge(webFlags.search_enabled)
                     : pinToolReminder(
                         appendPromptInstruction(retryBuild.prompt, emptyResponseNudge(webFlags.search_enabled), retryBudget),
                         tools,
                         retryBudget,
+                        promptOptions,
                     );
                 if (retryBuild?.compacted) {
                     promptCompacted = true;
@@ -5029,7 +5221,7 @@ const server = http.createServer(async (req, res) => {
             const shouldRepairMarkup = !noToolsMode && !toolCall && !shouldRepairNative && looksLikeToolCallMarkup(fullContent);
             const shouldRepairCodeDump = !noToolsMode && allowedToolNames.size > 0 && !toolCall && !shouldRepairMarkup && !shouldRepairNative && looksLikeCodeDumpInsteadOfTool(fullContent);
             const shouldRepairAbandoned = !noToolsMode && allowedToolNames.size > 0 && !toolCall && !shouldRepairMarkup && !shouldRepairNative && !shouldRepairCodeDump && looksLikeAbandonedToolLoop(fullContent, messages);
-            const shouldRepairNoTools = noToolsMode && !toolCall && !shouldRepairNative && looksLikeToolCallMarkup(fullContent);
+            const shouldRepairNoTools = noToolsMode && guardBlocksOn && !toolCall && !shouldRepairNative && looksLikeToolCallMarkup(fullContent);
             let repairRateLimitError = null;
             let repairUnavailable = false;
             let repairAttempts = 0;
@@ -5202,7 +5394,13 @@ const server = http.createServer(async (req, res) => {
             if (repairUnavailable) throw repairRateLimitError;
             if (!toolCall && looksLikeToolCallMarkup(fullContent)) {
                 const failure = { failedSessionId: session.id, failedMessageCount: session.messageCount, accountId: session.accountId };
-                if (noToolsMode) {
+                if (noToolsMode && !guardBlocksOn) {
+                    // Guard blocks were deliberately removed, so the model was never
+                    // told to avoid tool markup. Failing the request with 502 would
+                    // punish it for obeying a prompt we chose not to send. Return the
+                    // text as-is and let the client decide what it means.
+                    console.log(`${agentTag} No-tools request contains tool markup, but guard blocks are disabled; returning it as plain text.`);
+                } else if (noToolsMode) {
                     console.log(`${agentTag} No-tools request still has tool markup after repair.`);
                     logError(502, 'no_tools_but_tool_markup', 'Model emitted tool markup after being told no tools are allowed');
                     logRow.account = session.accountId;
@@ -5333,6 +5531,7 @@ const server = http.createServer(async (req, res) => {
             recordRequest(logRow);
             releaseAccountChatLock(lockHolder);
             releaseSlot();
+            if (activeSession && activeSession.messageCount > 0) saveSessions();
         }
     });
 });
@@ -5462,6 +5661,9 @@ async function main() {
     });
     // Periodically evict idle sessions (unref'd so it never keeps the process alive).
     setInterval(sweepIdleSessions, 10 * 60 * 1000).unref();
+    // Persist sessions to disk and reload on startup.
+    setInterval(saveSessions, 5 * 60 * 1000).unref();
+    loadSessions();
     server.listen(PORT, HOST, () => {
         console.log(`[DS-API] Server on http://${HOST}:${PORT} (multi-agent sessions enabled)`);
         console.log('[DS-API] POST /v1/chat/completions (OpenAI Chat Completions, stream=true|false)');
@@ -5548,11 +5750,18 @@ module.exports = {
         nativeToolRepairPrompt,
         noToolsRepairPrompt,
         noToolsContract,
+        guardBlocksEnabled,
+        resolveGuardBlocks,
         effectiveToolsForRequest,
         isNoToolsRequest,
         splitConversationTurns,
         compactConversation,
         truncatePromptMiddle,
+        autoCompactIfNeeded,
+        structuredCompact: contextLib.structuredCompact,
+        contextNotice: contextLib.COMPACTION_NOTICE,
+        boundHistoryText: contextLib.boundHistoryText,
+        extractAnchors: contextLib.extractAnchors,
         hasExplicitConversationHistory,
         buildRecoveryHistoryPrefix,
         buildBoundedPrompt,

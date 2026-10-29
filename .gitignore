@@ -9,3 +9,15 @@ auth.json
 .freedeepseek-api/
 accounts/*.json
 /accounts/*.json
+
+# --- Local runtime data (never commit) -------------------------------------
+# Session history holds your actual conversation transcripts.
+data/
+# PID files and service logs written by local-stack/start.ps1.
+local-stack/logs/
+local-stack/run/
+# Editor/OS noise.
+*.bak
+*.bak-*
+*.log
+Thumbs.db

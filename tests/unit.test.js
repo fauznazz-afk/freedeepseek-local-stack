@@ -265,8 +265,9 @@ test('Containerfile keeps the rootless Podman runtime minimal and fail-closed', 
 
   assert.deepEqual(copyLines, [
     'COPY --chown=1000:1000 package.json server.js ./',
-    // server.js requires lib/updater.js; the image still has no .git, so it reports updates as unavailable.
-    'COPY --chown=1000:1000 lib/pow.js lib/updater.js ./lib/',
+    // server.js requires lib/updater.js (updates) and lib/context.js (compaction);
+    // the image still has no .git, so it reports updates as unavailable.
+    'COPY --chown=1000:1000 lib/pow.js lib/updater.js lib/context.js ./lib/',
     'COPY --chown=1000:1000 scripts/lib/tui-menu.js ./scripts/lib/tui-menu.js',
     'COPY --chown=1000:1000 public/dashboard/index.html public/dashboard/*.css public/dashboard/*.js public/dashboard/*.png public/dashboard/*.jpg public/dashboard/*.woff2 public/dashboard/GEIST-LICENSE.txt ./public/dashboard/',
   ]);
@@ -692,7 +693,7 @@ test('tool schema compaction preserves literal const, enum, and default values',
 
 test('buildBoundedPrompt preserves task edges and drops duplicate recovery history', () => {
   const system = `SYSTEM_START\n${'s'.repeat(50000)}\nTOOL_ADAPTER_END`;
-  const history = `[Previous conversation]\n${'h'.repeat(10000)}\n`;
+  const history = `[Recovered record of this conversation]\n${'h'.repeat(10000)}\n`;
   const conversation = `TASK_START\n${'c'.repeat(70000)}\nLATEST_TOOL_RESULT`;
   const bounded = serverInternals.buildBoundedPrompt(system, history, conversation, 20000);
 
@@ -703,7 +704,7 @@ test('buildBoundedPrompt preserves task edges and drops duplicate recovery histo
   assert.match(bounded.prompt, /TOOL_ADAPTER_END/);
   assert.match(bounded.prompt, /TASK_START/);
   assert.match(bounded.prompt, /LATEST_TOOL_RESULT/);
-  assert.doesNotMatch(bounded.prompt, /Previous conversation/);
+  assert.doesNotMatch(bounded.prompt, /Recovered record/);
 });
 
 test('conversation compaction shrinks huge tool results and keeps the latest user turn', () => {
@@ -722,6 +723,69 @@ test('conversation compaction shrinks huge tool results and keeps the latest use
   assert.ok(oldRepeats < 800, `oldest tool result should be shrunk, got ${oldRepeats} repeats`);
 });
 
+test('compaction announces itself so the model cannot mistake a hole for memory', () => {
+  const conversation = [
+    'User: refactor the auth module in src/auth/session.js\n\n',
+    `[Tool Result]\n${'x'.repeat(200000)}\nERROR: Cannot find module ./crypto at C:\\proj\\src\\auth\\session.js\n\n`,
+    'User: keep going\n',
+  ].join('');
+  const compacted = serverInternals.compactConversation(conversation, 20000);
+
+  assert.ok(compacted.length <= 20000);
+  // The notice is the anti-hallucination contract: it tells the model the
+  // transcript is incomplete and forbids inventing what it cannot see.
+  assert.match(compacted, /Context notice/);
+  assert.match(compacted, /Do not invent file contents/);
+  assert.match(compacted, /re-read the source with a tool/);
+  // Anchors survive the condensation, so the task is still actionable.
+  assert.match(compacted, /src\/auth\/session\.js/);
+  assert.match(compacted, /Cannot find module/);
+  // And it must not claim the gap silently.
+  assert.doesNotMatch(compacted, /Earlier context compacted/);
+});
+
+test('compaction does not stack duplicate notices when it runs twice', () => {
+  const conversation = `User: ${'a'.repeat(50000)}\n\n[Tool Result]\n${'b'.repeat(50000)}\n\n`;
+  const once = serverInternals.compactConversation(conversation, 12000);
+  const twice = serverInternals.compactConversation(once, 12000);
+  const notices = (twice.match(/Context notice/g) || []).length;
+  assert.equal(notices, 1);
+});
+
+test('compaction uses the whole budget instead of wasting it on an even split', () => {
+  // One huge turn next to short ones: an even split would leave most of the
+  // budget unused, which is exactly the long-context capacity we are trying
+  // to keep.
+  const conversation = [
+    'User: inspect the build\n\n',
+    `[Tool Result]\n${'z'.repeat(120000)}\n\n`,
+    'User: and the test output\n',
+    'Assistant: done\n\n',
+  ].join('');
+  const limit = 30000;
+  const compacted = serverInternals.compactConversation(conversation, limit);
+  assert.ok(compacted.length <= limit);
+  assert.ok(compacted.length > limit * 0.6, `expected most of the budget used, got ${compacted.length}/${limit}`);
+});
+
+test('replayed history is labelled as a recovered summary, not verbatim memory', () => {
+  const prefix = serverInternals.buildRecoveryHistoryPrefix([
+    { user: 'original task', assistant: 'original answer' },
+  ]);
+  assert.match(prefix, /Recovered record of this conversation/);
+  assert.match(prefix, /not as verbatim text/);
+  assert.match(prefix, /do not assume it is complete/);
+  assert.match(prefix, /original task/);
+});
+
+test('history entries keep both ends instead of a mid-sentence tail', () => {
+  const entry = `TASK: fix the login flow in src/login.js\n${'m'.repeat(30000)}\nFINAL: tests pass`;
+  const bounded = serverInternals.boundHistoryText(entry, 4000);
+  assert.ok(bounded.length <= 4000);
+  assert.match(bounded, /TASK: fix the login flow/);
+  assert.match(bounded, /FINAL: tests pass/);
+});
+
 test('tool reminder is pinned after compaction so sticky sessions keep the tool format', () => {
   const tools = [
     { type: 'function', function: { name: 'write_file', parameters: { type: 'object' } } },
@@ -736,6 +800,90 @@ test('tool reminder is pinned after compaction so sticky sessions keep the tool 
   assert.match(pinned, /--- END TOOL REMINDER ---$/);
   assert.match(pinned, /Available tools: write_file, read_file/);
   assert.equal(serverInternals.formatToolReminder([]), '');
+});
+
+test('DEEPSEEK_GUARD_BLOCKS=off drops the prohibitions but keeps the wire format', () => {
+  const tools = [
+    { type: 'function', function: { name: 'write_file', parameters: { type: 'object' } } },
+  ];
+  const prompt = 'User: refactor src/app.js\n';
+  const saved = process.env.DEEPSEEK_GUARD_BLOCKS;
+  try {
+    // Default: the contract and the "do not paste source files" rule are on.
+    delete process.env.DEEPSEEK_GUARD_BLOCKS;
+    assert.equal(serverInternals.guardBlocksEnabled(), true);
+    assert.match(serverInternals.noToolsContract(), /NO-TOOLS CONTRACT/);
+    assert.match(serverInternals.pinToolReminder(prompt, tools), /Do not paste source files/);
+
+    process.env.DEEPSEEK_GUARD_BLOCKS = 'off';
+    assert.equal(serverInternals.guardBlocksEnabled(), false);
+    // No-tools contract is gone entirely.
+    assert.equal(serverInternals.noToolsContract(), '');
+    // The prohibition is gone...
+    const relaxed = serverInternals.pinToolReminder(prompt, tools);
+    assert.doesNotMatch(relaxed, /Do not paste source files/);
+    assert.doesNotMatch(relaxed, /TOOL REMINDER/);
+    assert.match(relaxed, /User: refactor src\/app\.js/);
+    // ...but the {"tool_call":...} envelope stays: it is a parsing contract, and
+    // dropping it would turn valid answers into malformed_tool_call failures.
+    assert.match(relaxed, /"tool_call":\{"name":"<function_name>"/);
+    assert.match(relaxed, /Available tools: write_file/);
+  } finally {
+    if (saved === undefined) delete process.env.DEEPSEEK_GUARD_BLOCKS;
+    else process.env.DEEPSEEK_GUARD_BLOCKS = saved;
+  }
+
+  for (const off of ['off', '0', 'false', 'no', 'none', 'disabled', 'OFF']) {
+    assert.equal(serverInternals.guardBlocksEnabled({ DEEPSEEK_GUARD_BLOCKS: off }), false, `expected ${off} to disable`);
+  }
+  assert.equal(serverInternals.guardBlocksEnabled({ DEEPSEEK_GUARD_BLOCKS: 'on' }), true);
+  assert.equal(serverInternals.guardBlocksEnabled({ DEEPSEEK_GUARD_BLOCKS: '' }), true);
+});
+
+test('guard blocks default to on so a missing env var cannot weaken the proxy', () => {
+  // Fail closed: an unset, empty, or unrecognised value keeps the guards.
+  assert.equal(serverInternals.guardBlocksEnabled({}), true);
+  assert.equal(serverInternals.guardBlocksEnabled({ DEEPSEEK_GUARD_BLOCKS: '   ' }), true);
+  assert.equal(serverInternals.guardBlocksEnabled({ DEEPSEEK_GUARD_BLOCKS: 'maybe' }), true);
+});
+
+test('guard blocks can be relaxed for one request without weakening the others', () => {
+  // The env var is a process-wide switch, which is too blunt: turning it off to
+  // refactor one file would also drop the tool-format guard for every agent
+  // request. A per-request override keeps the blast radius at one call.
+  const saved = process.env.DEEPSEEK_GUARD_BLOCKS;
+  try {
+    delete process.env.DEEPSEEK_GUARD_BLOCKS;
+    // Header wins.
+    assert.equal(serverInternals.resolveGuardBlocks({}, { 'x-deepseek-guard-blocks': 'off' }), false);
+    assert.equal(serverInternals.resolveGuardBlocks({}, { 'x-deepseek-guard-blocks': 'on' }), true);
+    // Body field is accepted too.
+    assert.equal(serverInternals.resolveGuardBlocks({ guard_blocks: false }, {}), false);
+    assert.equal(serverInternals.resolveGuardBlocks({ guard_blocks: 'off' }, {}), false);
+    assert.equal(serverInternals.resolveGuardBlocks({ guard_blocks: true }, {}), true);
+    // Nothing specified: fall back to the process default (on).
+    assert.equal(serverInternals.resolveGuardBlocks({}, {}), true);
+
+    // An explicit per-request "on" survives a globally disabled env var.
+    process.env.DEEPSEEK_GUARD_BLOCKS = 'off';
+    assert.equal(serverInternals.resolveGuardBlocks({}, {}), false);
+    assert.equal(serverInternals.resolveGuardBlocks({}, { 'x-deepseek-guard-blocks': 'on' }), true);
+  } finally {
+    if (saved === undefined) delete process.env.DEEPSEEK_GUARD_BLOCKS;
+    else process.env.DEEPSEEK_GUARD_BLOCKS = saved;
+  }
+});
+
+test('relaxed guard blocks still let the model return whole files', () => {
+  // The point of the flag: a refactor answer is source code, so the prompt must
+  // no longer forbid pasting it. The wire-format envelope stays.
+  const tools = [{ type: 'function', function: { name: 'write_file', parameters: { type: 'object' } } }];
+  const relaxed = serverInternals.pinToolReminder('User: refactor\n', tools, 800000, { guards: false });
+  assert.doesNotMatch(relaxed, /Do not paste source files/);
+  assert.doesNotMatch(relaxed, /Do not call execute_code/);
+  assert.match(relaxed, /"tool_call":\{"name":"<function_name>"/);
+  assert.equal(serverInternals.noToolsContract(false), '');
+  assert.match(serverInternals.noToolsContract(true), /NO-TOOLS CONTRACT/);
 });
 
 test('client-provided multi-turn history suppresses server recovery-history injection', () => {
@@ -978,13 +1126,13 @@ test('abandoned tool-loop detector retries short stops after a tool result', () 
 
 test('empty-response retry keeps recovery history unless a smaller global cap requires compaction', () => {
   const system = 'SYSTEM';
-  const history = '[Previous conversation]\nUser: old\nAssistant: answer\n\n[Continue from here]\n\n';
+  const history = '[Recovered record of this conversation]\nUser: old\nAssistant: answer\n\n[Continue from here]\n\n';
   const conversation = 'User: follow up';
   const initial = serverInternals.buildBoundedPrompt(system, history, conversation, 5000);
   const unchangedRetry = serverInternals.buildRetryPrompt(system, history, conversation, initial.prompt, 4000);
 
   assert.equal(unchangedRetry.compacted, false);
-  assert.match(unchangedRetry.prompt, /Previous conversation/);
+  assert.match(unchangedRetry.prompt, /Recovered record of this conversation/);
   assert.match(unchangedRetry.prompt, /Assistant: answer/);
 
   const largeConversation = `TASK_START\n${'x'.repeat(9000)}\nLATEST_RESULT`;
@@ -1012,7 +1160,7 @@ test('fresh-session retry restores local history that a healthy remote session i
   );
 
   assert.ok(freshSessionRetry.prompt.length > establishedSessionPrompt.length);
-  assert.match(freshSessionRetry.prompt, /Previous conversation/);
+  assert.match(freshSessionRetry.prompt, /Recovered record of this conversation/);
   assert.match(freshSessionRetry.prompt, /original task/);
   assert.match(freshSessionRetry.prompt, /original answer/);
   assert.match(freshSessionRetry.prompt, /follow up/);

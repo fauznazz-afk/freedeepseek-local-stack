@@ -48,6 +48,7 @@ One model is on the site today: **DeepSeek-V4.1-Flash**. The native Web Search b
 
 ## Contents
 
+- [Repository layout](#repository-layout)
 - [What you get](#what-you-get)
 - [Features](#features)
 - [Quick start](#quick-start)
@@ -80,6 +81,40 @@ One model is on the site today: **DeepSeek-V4.1-Flash**. The native Web Search b
 - [Refresh the login](#refresh-the-login)
 - [Tests](#tests)
 - [Project status](#project-status)
+
+---
+
+## Repository layout
+
+This repo is one self-contained folder with two parts:
+
+```
+<repo root>/
+├── server.js            # the proxy itself (port 9655)
+├── lib/                 # proxy modules (pow, updater, context compaction)
+├── public/, docs/, tests/, scripts/, integrations/
+└── local-stack/         # the local launcher that wires everything together
+    ├── Start-All.bat    # start proxy + 9router, then verify
+    ├── Stop-All.bat     # stop both
+    ├── Verify-All.bat   # end-to-end chain check
+    ├── start.ps1 / stop.ps1 / verify.ps1
+    ├── patch-deepseek.ps1, clear-stale-errors.ps1
+    └── README.md, CONTEXT-MEMORY.md, REFACTOR-MODE.md
+```
+
+The proxy is the root of the repo. `local-stack/` is a helper layer: it starts the proxy plus a local 9router instance on port 20128, then proves a request can travel `client → 9router → proxy → DeepSeek`. Scripts in `local-stack/` resolve the proxy as their parent folder, so the repo works wherever you clone it (override with `$env:FREEDEEPSEEK_DIR`).
+
+**Quick use on Windows:**
+
+```bat
+local-stack\Start-All.bat     :: start everything
+local-stack\Verify-All.bat    :: check the whole chain
+local-stack\Stop-All.bat      :: stop everything
+```
+
+Details: [local-stack/README.md](local-stack/README.md) · context memory: [local-stack/CONTEXT-MEMORY.md](local-stack/CONTEXT-MEMORY.md) · refactor mode: [local-stack/REFACTOR-MODE.md](local-stack/REFACTOR-MODE.md).
+
+> Nothing in this repo ships credentials. `deepseek-auth.json`, `auth.json`, `accounts/*.json`, `data/`, and `local-stack/logs|run` are git-ignored. Log in locally and your own session stays on your machine.
 
 ---
 
