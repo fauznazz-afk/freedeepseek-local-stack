@@ -49,6 +49,7 @@ One model is on the site today: **DeepSeek-V4.1-Flash**. The native Web Search b
 ## Contents
 
 - [Repository layout](#repository-layout)
+- [Local changes in this repo](#local-changes-in-this-repo)
 - [What you get](#what-you-get)
 - [Features](#features)
 - [Quick start](#quick-start)
@@ -115,6 +116,119 @@ local-stack\Stop-All.bat      :: stop everything
 Details: [local-stack/README.md](local-stack/README.md) · context memory: [local-stack/CONTEXT-MEMORY.md](local-stack/CONTEXT-MEMORY.md) · refactor mode: [local-stack/REFACTOR-MODE.md](local-stack/REFACTOR-MODE.md).
 
 > Nothing in this repo ships credentials. `deepseek-auth.json`, `auth.json`, `accounts/*.json`, `data/`, and `local-stack/logs|run` are git-ignored. Log in locally and your own session stays on your machine.
+
+---
+
+## Local changes in this repo
+
+This repository is a fork of [dekrezz/FreeDeepseekAPI](https://github.com/dekrezz/FreeDeepseekAPI) with a set of local changes. The upstream remote is kept as `upstream`, so you can still pull upstream work:
+
+```bash
+git fetch upstream
+git log --oneline upstream/stable..HEAD    # what is local-only
+```
+
+### 1. `local-stack/` — the launcher, merged into this repo
+
+The launcher used to live in a separate folder. It is now a subfolder of the proxy repo, so one clone gives you the whole chain.
+
+| File | What it does |
+|---|---|
+| `start.ps1` | Starts the proxy and 9router hidden, waits until HTTP is really ready |
+| `stop.ps1` | Stops by PID file + command-line pattern, never touches unrelated node processes |
+| `verify.ps1` | Checks `/health`, `/v1/models`, and one real completion through 9router |
+| `patch-deepseek.ps1` | Idempotent: points the 9router build from `api.deepseek.com` at the proxy |
+| `clear-stale-errors.ps1` | Clears stale `401` state and model locks in the 9router SQLite DB |
+
+Two things were fixed while merging:
+
+- **No hardcoded paths.** `start.ps1` resolves the proxy as its parent directory (`..` from `$PSScriptRoot`) and fails loudly if `server.js` is not there. Override with `$env:FREEDEEPSEEK_DIR`. The repo now works wherever you clone it.
+- **No hardcoded key.** `verify.ps1` read a real 9router API key from its own source. It now reads `$env:NINEROUTER_KEY`, falling back to `local`, because the proxy accepts any key.
+
+Full launcher documentation: [local-stack/README.md](local-stack/README.md).
+
+### 2. Long-context memory — `lib/context.js`
+
+The proxy used to lose the middle of long sessions and then invent plausible detail to cover the gap. Three causes were fixed:
+
+| Before | Now |
+|---|---|
+| `storeHistory()` kept only the last 500 characters, cut mid-sentence | Keeps the whole prompt, bounded to 12,000 characters per entry, preserving **both ends** (`boundHistoryText`). History budget is 400,000 characters |
+| Tool results were capped at 25% of the budget, then middle turns were `splice`d out silently, oldest first | Opening task kept (capped at 30%), newest ~35% of turns kept verbatim, middle turns **condensed with anchors intact** |
+| Whatever was left was cut blindly (`head 25% / tail 75%`) behind a bare `[Earlier context compacted]` marker | `allocateBudget()` water-fills across turns: a short turn takes only what it needs and the rest goes to long turns. Drops happen only if still over, and the count is stated out loud |
+
+The anti-confabulation lever is a notice pinned to every compacted prompt:
+
+```text
+[Context notice: this conversation was condensed to fit the model context window.]
+- Do not claim to remember details that are not shown above.
+- Do not invent file contents, paths, command output, test results, error messages, or earlier statements.
+- If a detail you need is missing, say so plainly and re-read the source with a tool instead of guessing.
+```
+
+The failure mode was never "the model forgot" — it was "the model did not notice it had forgotten" and filled the hole with confident detail. A model that knows something is missing will re-read the file; a model that does not know will guess.
+
+Replayed history is likewise labelled `[Recovered record of this conversation...]` so a rebuilt session is not mistaken for a verbatim transcript.
+
+Honest limits: this is **not** a real 1M-token window, and compaction is **extractive** (select and cut), not abstractive — no extra LLM call, so no extra cost or latency, but summaries are less clever than true summarization. Anchors are regex-based, so unusual log formats can slip through without anchors.
+
+Details: [local-stack/CONTEXT-MEMORY.md](local-stack/CONTEXT-MEMORY.md).
+
+### 3. Refactor mode — per-request guard-block opt-out
+
+The proxy appends two blocks to the upstream prompt: a `NO-TOOLS CONTRACT` (plain text only, no tool markup) and a `TOOL REMINDER`. One line in the reminder reads **"Do not paste source files or diffs"** — which is exactly the wrong instruction for a refactor request, where the answer *is* the source and a model told not to paste files can only describe the change in prose.
+
+Turning them off globally was the wrong fix: it would weaken every agent request just to serve one refactor call. So the opt-out is **per request**:
+
+| Where | Value |
+|---|---|
+| JSON body | `"guard_blocks": false` |
+| HTTP header | `x-deepseek-guard-blocks: off` (wins over the body) |
+| Env fallback | `DEEPSEEK_GUARD_BLOCKS=off` |
+
+Accepted off values: `off`, `0`, `false`, `no`, `none`, `disabled`. Default is on.
+
+What "off" does and does not do:
+
+- It **drops the prohibitions** — no `NO-TOOLS CONTRACT`, and the `TOOL REMINDER` degrades to a bare `TOOL FORMAT` block that states only the wire shape.
+- It **keeps the `{"tool_call":...}` envelope** when tools are advertised. That envelope is a parsing contract, not a style rule; removing it turns valid answers into `502 malformed_tool_call`.
+- It relaxes the related error paths (`502 no_tools_but_tool_markup` and the `shouldRepairNoTools` repair) so a plain code answer is not treated as a broken tool call.
+- Recovery prompts are untouched — they only run after a failure and exist to rescue the request.
+
+**Both settings are needed when going through 9router:**
+
+```json
+{ "guard_blocks": false, "tool_choice": "none" }
+```
+
+Without `tool_choice: "none"`, the model will pick `write_file` even with the guards off — because the tool is available, not because text was forbidden.
+
+One practical finding: **9router drops client headers**, including `x-deepseek-guard-blocks`. Only body fields survive the hop. Use `guard_blocks` in the body when you call through 9router; the header works on direct proxy calls.
+
+Details and log evidence: [local-stack/REFACTOR-MODE.md](local-stack/REFACTOR-MODE.md).
+
+### 4. Defaults and packaging
+
+| Change | Value |
+|---|---|
+| `DEEPSEEK_MAX_PROMPT_CHARS` default | `80000` → `800000` (the real Web ceiling, roughly 200k tokens) |
+| `Containerfile` | Ships `lib/context.js` alongside `lib/pow.js` and `lib/updater.js` |
+| `integrations/cursor/` | Settings snippet and launcher documented; key read from `PROXY_API_KEY` |
+
+`DEEPSEEK_ACCOUNT_COOLDOWN_MS` stays at `600000` (10 minutes), which matches upstream. It is worth knowing why: DeepSeek's own throttle message means "too many messages", and a short cooldown just re-hits the same login while it is still throttled, turning a soft limit into a hard one.
+
+### 5. Repository hygiene
+
+`.gitignore` now also excludes `data/`, `local-stack/logs/`, `local-stack/run/`, `*.bak`, `*.bak-*`, `*.log`, and `Thumbs.db`. Duplicate `.bat` wrappers at the repo root were removed in favour of `local-stack/`, and a stray `server.js.bak-*` backup was deleted.
+
+### Test status
+
+```bash
+node --test tests/unit.test.js     # 103 pass
+npm test                           # 291 pass, 13 fail
+```
+
+The 13 failures are pre-existing and identical to the upstream baseline — they need Chrome, macOS, or tooling not present here. They are not caused by these changes.
 
 ---
 
@@ -380,7 +494,7 @@ FreeDeepseekAPI does not open a new DeepSeek chat on every HTTP request.
 - A changed system prompt is sent again.
 - An empty reply, a broken tool-call, or a timeout **keeps** the live chat. Those failures used to open a new chat and resend the whole prompt. They do not anymore.
 - A new chat starts when the session is missing, the chain hits 100 messages, the chat is older than 2 hours, DeepSeek says the prompt is too long, or you call `/reset-session`.
-- Long prompts are cut to `DEEPSEEK_MAX_PROMPT_CHARS` (default 80,000 characters) before they are sent. The start of the task, the latest tool results, and the tool reminder stay.
+- Long prompts are cut to `DEEPSEEK_MAX_PROMPT_CHARS` (default 800,000 characters) before they are sent. The start of the task, the latest tool results, and the tool reminder stay. Compaction is structured, not a blind head/tail cut: see [Long-context memory](#2-long-context-memory--libcontextjs).
 - If the client already sent a multi-turn history, the proxy does not paste its own recovery history a second time.
 - An empty reply is retried up to `DEEPSEEK_MAX_RETRIES` times (default 2). Each retry uses a smaller slice of context, still on the same chat when that chat is alive.
 
@@ -737,6 +851,27 @@ DeepSeek Web has no native tool-call array. The proxy writes the tool list into 
 
 While native search is on, harness `websearch`, `webfetch`, and `WebFetch` tools are stripped and the live web is the native chat.deepseek.com search. With search off they reach the agent unchanged.
 
+#### Guard blocks, and when to turn them off
+
+Two prompt blocks ride along with tool requests: a `NO-TOOLS CONTRACT` and a `TOOL REMINDER`. They keep agents calling tools instead of describing what they would do — good for agent traffic, actively wrong for a request whose answer is source code.
+
+The opt-out is per request, so one refactor call does not weaken everything else:
+
+```bash
+# direct to the proxy: header works
+curl -X POST http://127.0.0.1:9655/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-deepseek-guard-blocks: off" \
+  -d '{"model":"deepseek-v4-flash","tool_choice":"none", ...}'
+```
+
+```json
+// through 9router: 9router strips client headers, so use the body field
+{ "model": "ds/deepseek-v4-flash", "guard_blocks": false, "tool_choice": "none" }
+```
+
+Default is on. `DEEPSEEK_GUARD_BLOCKS=off` disables it process-wide, which is rarely what you want. What stays even when it is off: the `{"tool_call":...}` envelope when tools are advertised — that is the parsing contract, and removing it produces `502 malformed_tool_call`. See [Refactor mode](#3-refactor-mode--per-request-guard-block-opt-out).
+
 ### Images
 
 PNG, JPEG, WebP, and GIF. Up to 10 images, 20 MiB decoded each. The JSON body defaults to 30 MiB.
@@ -807,12 +942,13 @@ Full table: [docs/models.md](docs/models.md).
 | `PROXY_ADMIN_ALLOW_REMOTE` | off | If `1`, `/admin/*` answers non-loopback clients even without `PROXY_API_KEY` |
 | `DEEPSEEK_AUTH_PATH` | `./deepseek-auth.json` | One file, or a comma-separated list |
 | `DEEPSEEK_AUTH_DIR` | `./accounts` when that directory exists | Every `*.json` in it |
-| `DEEPSEEK_MAX_PROMPT_CHARS` | `80000` | Cap on what is sent upstream. Minimum 16000 |
+| `DEEPSEEK_MAX_PROMPT_CHARS` | `800000` | Cap on what is sent upstream. Minimum 16000 |
 | `DEEPSEEK_MAX_RETRIES` | `2` | Empty-reply retries on the same chat |
 | `DEEPSEEK_REQUEST_DEADLINE_MS` | `120000` | Per-request deadline |
 | `DEEPSEEK_MAX_CONCURRENT` | `24` | Process-wide cap. Real parallelism is the number of idle logins |
 | `DEEPSEEK_ACCOUNT_LOCK_WAIT_MS` | `120000` | How long a second chat waits for a busy login |
 | `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | Cooldown after 401, 403, or a rate limit without `Retry-After` |
+| `DEEPSEEK_GUARD_BLOCKS` | on | Fallback for the prompt guard blocks. `off` disables them process-wide; prefer the per-request `guard_blocks` body field. See [Refactor mode](#3-refactor-mode--per-request-guard-block-opt-out) |
 | `TRUST_PROXY` | off | If `1`, the client IP is taken from `X-Forwarded-For` |
 | `MAX_REQUEST_BODY_BYTES` | `31457280` | Maximum JSON body, including base64 images |
 | `NON_INTERACTIVE` / `SKIP_ACCOUNT_MENU` | off | Skip the launch menu |
@@ -831,6 +967,7 @@ Full table: [docs/models.md](docs/models.md).
 | 429 | `rate_limit` | Every login is in cooldown (rate-limited or auth failure). Honor `Retry-After` |
 | 429 | `rate_limit_error` | DeepSeek rate-limited the login and the request ran out of time or the client left before a failover finished. Honor `Retry-After` |
 | 502 | `malformed_tool_call` | Tool markup was still broken after one repair. The chat was kept |
+| 502 | `no_tools_but_tool_markup` | The model emitted tool markup on a no-tools request. Not raised when `guard_blocks` is off |
 | 502 | `empty_response` | DeepSeek returned nothing after the retries |
 | 503 | `overloaded` / `no_auth` | Too many in-flight requests, or no auth file |
 | 504 | `request_timeout` | The deadline in `DEEPSEEK_REQUEST_DEADLINE_MS` was hit |
