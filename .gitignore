@@ -21,3 +21,11 @@ local-stack/run/
 *.bak-*
 *.log
 Thumbs.db
+
+# --- Nested checkouts (never commit) ---------------------------------------
+# 9router-source/ is a separate git clone of serenhope/9router kept next to the
+# proxy so everything lives in one folder. It has its own history and upstream,
+# so committing it would nest one repo inside another. Clone it yourself:
+#   git clone https://github.com/serenhope/9router.git 9router-source
+9router-source/
+

@@ -19,7 +19,10 @@ $ErrorActionPreference = 'Stop'
 # $env:FREEDEEPSEEK_DIR when the proxy is installed elsewhere.
 $proxyDir = $env:FREEDEEPSEEK_DIR
 if (-not $proxyDir) { $proxyDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
-$routerApp = Join-Path $env:APPDATA 'npm\node_modules\9router\app'
+# 9router runs from the global npm install by default. Override with
+# $env:NINEROUTER_APP when you built it from 9router-source/ instead.
+$routerApp = $env:NINEROUTER_APP
+if (-not $routerApp) { $routerApp = Join-Path $env:APPDATA 'npm\node_modules\9router\app' }
 $runDir    = Join-Path $PSScriptRoot 'run'
 $logDir    = Join-Path $PSScriptRoot 'logs'
 $node      = (Get-Command node.exe -ErrorAction Stop).Source

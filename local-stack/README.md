@@ -14,6 +14,27 @@ jadi repo bisa dipindah/di-clone di mana saja. Override lewat `$env:FREEDEEPSEEK
 - `9router` terpasang global: `npm i -g 9router`
 - Sudah login DeepSeek di mesin ini (`npm run auth` dari root repo)
 
+## Di mana 9router sebenarnya jalan
+
+Ini sering bikin bingung, jadi saya tulis eksplisit:
+
+| Apa | Lokasi |
+|-----|--------|
+| 9router yang dijalankan launcher | `%APPDATA%\npm\node_modules\9router\app` (hasil `npm i -g`) |
+| State runtime 9router | `%APPDATA%\9router` (SQLite, backup patch) |
+| Source 9router (opsional) | `9router-source/` di root repo |
+
+`start.ps1` menjalankan `custom-server.js` dari **instalasi global**, bukan dari
+`9router-source/`. Source checkout itu hanya supaya kodenya ada di satu tempat —
+tidak ada di jalur runtime, dan di-ignore git karena clone terpisah.
+
+Kalau kamu build 9router dari checkout itu dan mau launcher memakainya:
+
+```powershell
+$env:NINEROUTER_APP = "D:\FreeDeepseekAPI\9router-source\app"
+powershell -File local-stack\start.ps1
+```
+
 ## Cara pakai
 
 | Aksi | Perintah |

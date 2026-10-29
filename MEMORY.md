@@ -12,6 +12,9 @@ to 9router. Runs on Windows on this machine.
 - Node 18+, zero npm dependencies in the proxy
 - Auth: `deepseek-auth.json` at repo root, git-ignored. Never commit it.
 - Local data lives in `data/sessions.json`, also git-ignored
+- 9router runtime: `%APPDATA%\npm\node_modules\9router\app` (global install, v0.5.112)
+- 9router state: `%APPDATA%\9router` (SQLite + patch backups)
+- 9router source checkout: `9router-source/` (v0.5.330, git-ignored, not on runtime path)
 
 ## Commands
 
@@ -38,6 +41,9 @@ to 9router. Runs on Windows on this machine.
 
 ## Traps
 
+- **The launcher does not run `9router-source/`.** `start.ps1` launches
+  `custom-server.js` from the global npm install. Editing the source checkout has
+  no effect until you build it and set `$env:NINEROUTER_APP` to its `app/` dir.
 - **9router drops client headers.** `x-agent-session` and
   `x-deepseek-guard-blocks` never reach the proxy through 9router. Use body fields
   (`user`, `guard_blocks`) instead.

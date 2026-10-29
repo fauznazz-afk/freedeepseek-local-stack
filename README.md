@@ -95,16 +95,40 @@ This repo is one self-contained folder with two parts:
 ├── server.js            # the proxy itself (port 9655)
 ├── lib/                 # proxy modules (pow, updater, context compaction)
 ├── public/, docs/, tests/, scripts/, integrations/
-└── local-stack/         # the local launcher that wires everything together
-    ├── Start-All.bat    # start proxy + 9router, then verify
-    ├── Stop-All.bat     # stop both
-    ├── Verify-All.bat   # end-to-end chain check
-    ├── start.ps1 / stop.ps1 / verify.ps1
-    ├── patch-deepseek.ps1, clear-stale-errors.ps1
-    └── README.md, CONTEXT-MEMORY.md, REFACTOR-MODE.md
+├── local-stack/         # the local launcher that wires everything together
+│   ├── Start-All.bat    # start proxy + 9router, then verify
+│   ├── Stop-All.bat     # stop both
+│   ├── Verify-All.bat   # end-to-end chain check
+│   ├── start.ps1 / stop.ps1 / verify.ps1
+│   ├── patch-deepseek.ps1, clear-stale-errors.ps1
+│   └── README.md, CONTEXT-MEMORY.md, REFACTOR-MODE.md
+└── 9router-source/      # optional: 9router source checkout (git-ignored)
 ```
 
 The proxy is the root of the repo. `local-stack/` is a helper layer: it starts the proxy plus a local 9router instance on port 20128, then proves a request can travel `client → 9router → proxy → DeepSeek`. Scripts in `local-stack/` resolve the proxy as their parent folder, so the repo works wherever you clone it (override with `$env:FREEDEEPSEEK_DIR`).
+
+### Where 9router actually runs from
+
+Worth knowing, because it is not where you might expect:
+
+| What | Path |
+|---|---|
+| 9router the launcher runs | `%APPDATA%\npm\node_modules\9router\app` (installed via `npm i -g 9router`) |
+| 9router runtime state | `%APPDATA%\9router` (SQLite DB, patch backups) |
+| 9router source, optional | `9router-source/` in this repo |
+
+`local-stack/start.ps1` launches `custom-server.js` from the **global install**, not from `9router-source/`. The source checkout is there so the code is in one place and easy to inspect or patch; it is not on the runtime path. It is also git-ignored, because it is a separate clone with its own history:
+
+```bash
+git clone https://github.com/serenhope/9router.git 9router-source
+```
+
+If you build 9router from that checkout, point the launcher at it explicitly:
+
+```powershell
+# In local-stack/start.ps1 the target is $routerApp
+$env:NINEROUTER_APP = "D:\FreeDeepseekAPI\9router-source\app"
+```
 
 **Quick use on Windows:**
 
