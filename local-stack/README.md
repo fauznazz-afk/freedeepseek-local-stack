@@ -232,6 +232,56 @@ Ada dua sebab, keduanya sisa konfigurasi lama:
 Proxy lokal menerima API key apa pun, jadi 401 hanya bisa berasal dari state lama
 semacam ini — bukan dari proxy.
 
+## Menambah akun kedua (rotasi saat rate-limit)
+
+Proxy mendukung banyak akun DeepSeek. Kalau satu kena cooldown, request berikutnya
+otomatis pindah ke akun yang lain — **rotasi bekerja tanpa kode tambahan**.
+
+### Caranya
+
+```powershell
+# 1. Siapkan folder accounts (hanya sekali)
+mkdir D:\FreeDeepseekAPI\accounts
+
+# 2. Login di browser ke akun DeepSeek kedua (profil/email berbeda)
+# 3. Ekspor cookie (dengan ekstensi "Get cookies.txt LOCALLY" atau sejenis)
+#    Simpan sebagai D:\FreeDeepseekAPI\accounts\cookies-akun2.json
+
+# 4. Import ke proxy (minta token dari variabel, aman dari history shell)
+$env:DEEPSEEK_TOKEN = "<token akun kedua>"
+npm run auth:import -- --input D:\FreeDeepseekAPI\accounts\cookies-akun2.json
+# Output: "Wrote D:\FreeDeepseekAPI\accounts\akun2.json"
+
+# 5. Restart
+deepseek-local restart
+```
+
+### Verifikasi
+
+```
+deepseek-local status
+```
+
+```
+  proxy    UP    port 9655  |  2 account(s), 2 ready
+                 cooling down: akun1 (rate_limit), ~5m 12s left
+  9router  UP    port 20128  |  local build v0.5.330
+```
+
+Dua akun berarti `2 ready` — kalau `akun1` cooling down, request masih dilayani
+`akun2` tanpa 429.
+
+> **Penting:** Akun harus benar-benar berbeda (email DeepSeek berbeda). Dua file
+> dari akun yang sama tetap berbagi kuota dan tidak menolong.
+
+### Alternatif: dashboard admin
+
+```
+# Buka dashboard
+# Klik "Import account" → pilih file cookies.json → isi nama → Simpan
+# (butuh PROXY_API_KEY kalau diaktifkan)
+```
+
 ## File
 
 | File | Fungsi |

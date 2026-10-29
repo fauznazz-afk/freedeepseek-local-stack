@@ -21,6 +21,7 @@ const net = require('net');
 const { spawn, spawnSync } = require('child_process');
 const pow = require('./lib/pow');
 const { createUpdater, RESTART_EXIT_CODE } = require('./lib/updater');
+const { createCooldownStore } = require('./lib/cooldowns');
 const { t, loadUiLang, saveUiLang, pick, pause, printWordmark, browserOpenCommand } = require('./scripts/lib/tui-menu');
 
 // Numeric env setting: unset or empty means the default; anything that is not a
@@ -175,6 +176,10 @@ function markContextCompacted(res) {
 const sessions = new Map();  // keyed by agent ID (from `user` field)
 const SESSIONS_FILE_PATH = path.join(__dirname, 'data', 'sessions.json');
 const MAX_SESSION_FILE_BYTES = 50 * 1024 * 1024; // 50 MB
+// Cooldowns survive restarts: the throttle lives upstream, not in this process.
+const COOLDOWNS_FILE_PATH = process.env.DEEPSEEK_COOLDOWN_STATE_PATH
+    || path.join(__dirname, 'data', 'cooldowns.json');
+const cooldownStore = createCooldownStore(COOLDOWNS_FILE_PATH);
 
 function ensureSessionsDir() {
     const dir = path.dirname(SESSIONS_FILE_PATH);
@@ -476,6 +481,10 @@ function buildAccountsList(loaded, previous = []) {
 }
 function applyAccountsList({ list, relogged = [] }) {
     accounts.splice(0, accounts.length, ...list);
+    // Restore persisted cooldowns. The throttle is a remote fact, so a restart must
+    // not silently clear it - that only makes the next request hit DeepSeek again
+    // and re-arm the window from scratch.
+    for (const account of accounts) cooldownStore.apply(account);
     // Remote chats belong to the DeepSeek user that created them. After a re-login
     // (new token/cookie) they may be foreign, so pinned sessions start a fresh chat
     // with their local recovery history. Removed accounts rotate via selectAccountForSession.
@@ -519,18 +528,26 @@ const MAX_REQUEST_LOG = 400;
 const usageByAccount = new Map();
 
 function accountStatus(account) {
+    const now = Date.now();
     const lock = accountLocks.get(account.id);
     const usage = usageByAccount.get(account.id) || { prompt_tokens: 0, completion_tokens: 0, usd: 0, requests: 0 };
+    const cooling = (account.cooldownUntil || 0) > now;
     return {
         id: account.id,
         name: String(account.config.name || account.id),
         file: path.basename(account.file || ''),
         enabled: isAccountEnabled(account),
-        ready: accountHasCredentials(account),
+        // "ready" used to mean "this file has credentials", which reported a
+        // cooling-down account as ready and sent people chasing a phantom bug.
+        // It now means what a caller assumes: this login can serve a request right
+        // now. has_credentials is kept so the distinction is still visible.
+        ready: accountCanServe(account, now),
+        has_credentials: accountHasCredentials(account),
+        status: adminAccountStatus(account, now),
         token: Boolean(account.config.token),
         cookies: String(account.config.cookie || '').split(';').filter(Boolean).length,
-        cooldown: account.cooldownUntil > Date.now(),
-        cooldown_remaining_sec: Math.max(0, Math.ceil((account.cooldownUntil - Date.now()) / 1000)),
+        cooldown: cooling,
+        cooldown_remaining_sec: cooling ? Math.max(0, Math.ceil((account.cooldownUntil - now) / 1000)) : 0,
         busy: Boolean(lock),
         busy_agent: lock?.agentId || null,
         // Lifetime count (the pre-admin /health contract). Consecutive failures,
@@ -807,6 +824,7 @@ function markAccountRateLimited(account, detail = '', retryAfterRaw = null, stat
     account.cooldownUntil = Math.max(account.cooldownUntil || 0, Date.now() + cooldownMs);
     account.cooldownReason = 'rate_limit';
     countAccountFailure(account, 'rate_limit', status, detail);
+    cooldownStore.record(account);
     console.log(`[account:${account.id}] rate-limited${reason ? ` (${reason})` : ''}: cooldown for ${Math.round(cooldownMs / 1000)}s${retryMs != null ? ' (Retry-After)' : ''} after HTTP ${status}: ${clipText(detail, 120)}`);
     return cooldownMs;
 }
@@ -821,6 +839,7 @@ function markAccountFailure(account, status, reason = '', retryAfterRaw = null, 
         countAccountFailure(account, 'auth', code, detail || `HTTP ${code}`);
         account.cooldownUntil = Math.max(account.cooldownUntil || 0, Date.now() + DEFAULT_ACCOUNT_COOLDOWN_MS);
         account.cooldownReason = 'auth';
+        cooldownStore.record(account);
         console.log(`[account:${account.id}] cooldown for ${Math.round(DEFAULT_ACCOUNT_COOLDOWN_MS / 1000)}s after HTTP ${code}${reason ? ` (${reason})` : ''}`);
         return;
     }
@@ -832,6 +851,8 @@ function recordAccountSuccess(account) {
     if (!account) return;
     account.failures = 0;
     account.lastSuccessAt = Date.now();
+    // The login answered, so any persisted cooldown for it is stale.
+    cooldownStore.clear(account.id);
 }
 // Mark the login as rate-limited and return a typed 429 the request handler
 // recognizes as "fail over to another login".
@@ -5806,6 +5827,8 @@ module.exports = {
         MAX_SESSIONS_ON_DISK,
         MAX_HISTORY_LENGTH,
         MAX_HISTORY_CHARS,
+        cooldownStore,
+        COOLDOWNS_FILE_PATH,
         buildBoundedPrompt,
         buildRetryPrompt,
         isContinuationRecoverySafe,

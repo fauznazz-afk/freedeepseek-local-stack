@@ -265,9 +265,10 @@ test('Containerfile keeps the rootless Podman runtime minimal and fail-closed', 
 
   assert.deepEqual(copyLines, [
     'COPY --chown=1000:1000 package.json server.js ./',
-    // server.js requires lib/updater.js (updates) and lib/context.js (compaction);
-    // the image still has no .git, so it reports updates as unavailable.
-    'COPY --chown=1000:1000 lib/pow.js lib/updater.js lib/context.js ./lib/',
+    // server.js requires lib/updater.js (updates), lib/context.js (compaction) and
+    // lib/cooldowns.js (cooldown state that survives a restart); the image still
+    // has no .git, so it reports updates as unavailable.
+    'COPY --chown=1000:1000 lib/pow.js lib/updater.js lib/context.js lib/cooldowns.js ./lib/',
     'COPY --chown=1000:1000 scripts/lib/tui-menu.js ./scripts/lib/tui-menu.js',
     'COPY --chown=1000:1000 public/dashboard/index.html public/dashboard/*.css public/dashboard/*.js public/dashboard/*.png public/dashboard/*.jpg public/dashboard/*.woff2 public/dashboard/GEIST-LICENSE.txt ./public/dashboard/',
   ]);
@@ -2055,6 +2056,88 @@ test('session limits are configurable, with the old defaults preserved', () => {
   assert.equal(MAX_SESSIONS_ON_DISK, 500, 'default session cap must stay 500');
   assert.equal(MAX_HISTORY_LENGTH, 100, 'default replay depth must stay 100 messages');
   assert.equal(MAX_HISTORY_CHARS, 400000, 'default replay budget must stay 400k chars');
+});
+
+test('a cooldown survives a restart, so restart cannot fake a fix', () => {
+  // The throttle lives upstream. Keeping it only in memory meant `deepseek-local
+  // restart` appeared to clear it, the next request hit DeepSeek again, and the
+  // window was re-armed from scratch.
+  const { createCooldownStore } = require('../lib/cooldowns');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-'));
+  const file = path.join(dir, 'cooldowns.json');
+  const now = () => 1000000;
+  const config = { token: 'tok-a', cookie: 'ck-a' };
+
+  const first = createCooldownStore(file, { now, log: { error() {} } });
+  first.record({ id: 'a', config, cooldownUntil: 1000000 + 600000, cooldownReason: 'rate_limit' });
+  first.flush();
+
+  // A fresh process (new store instance) must see the same cooldown.
+  const second = createCooldownStore(file, { now, log: { error() {} } });
+  second._load();
+  const account = { id: 'a', config, cooldownUntil: 0 };
+  assert.equal(second.apply(account), true, 'the saved cooldown must be restored');
+  assert.equal(account.cooldownUntil, 1000000 + 600000);
+  assert.equal(account.cooldownReason, 'rate_limit');
+});
+
+test('a re-login does not inherit the previous login\'s cooldown', () => {
+  const { createCooldownStore } = require('../lib/cooldowns');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-'));
+  const file = path.join(dir, 'cooldowns.json');
+  const now = () => 1000000;
+
+  const first = createCooldownStore(file, { now, log: { error() {} } });
+  first.record({ id: 'a', config: { token: 'old', cookie: 'old' }, cooldownUntil: 1600000, cooldownReason: 'rate_limit' });
+  first.flush();
+
+  const second = createCooldownStore(file, { now, log: { error() {} } });
+  second._load();
+  const relogged = { id: 'a', config: { token: 'new', cookie: 'new' }, cooldownUntil: 0 };
+  assert.equal(second.apply(relogged), false, 'a different login is a different upstream identity');
+  assert.equal(relogged.cooldownUntil, 0);
+});
+
+test('an expired cooldown is not restored, and a corrupt file cannot block startup', () => {
+  const { createCooldownStore } = require('../lib/cooldowns');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-'));
+  const file = path.join(dir, 'cooldowns.json');
+  const now = () => 2000000;
+
+  fs.writeFileSync(file, JSON.stringify({
+    old: { cooldownUntil: 1000000, cooldownReason: 'rate_limit', fingerprint: '' },
+  }), 'utf8');
+  const store = createCooldownStore(file, { now, log: { error() {} } });
+  store._load();
+  const account = { id: 'old', config: { token: 't', cookie: 'c' }, cooldownUntil: 0 };
+  assert.equal(store.apply(account), false, 'an expired cooldown must not be restored');
+
+  fs.writeFileSync(file, 'not json at all', 'utf8');
+  const broken = createCooldownStore(file, { now, log: { error() {} } });
+  assert.deepEqual(broken._load(), {}, 'a corrupt file must degrade to "no cooldowns"');
+});
+
+test('/health "ready" means can-serve-now, not merely has-credentials', () => {
+  // It used to report a cooling-down login as ready, which sent people looking for
+  // a bug in their client while the pool had no capacity at all.
+  const now = Date.now();
+  const cooling = {
+    id: 'a', config: { name: 'a', token: 't', cookie: 'c' }, file: 'a.json',
+    cooldownUntil: now + 60000, cooldownReason: 'rate_limit',
+  };
+  const view = serverInternals.accountStatus(cooling);
+  assert.equal(view.ready, false, 'a cooling-down login must not report ready');
+  assert.equal(view.has_credentials, true, 'but its credentials are still present');
+  assert.equal(view.status, 'cooldown');
+  assert.equal(view.cooldown, true);
+  assert.ok(view.cooldown_remaining_sec > 0);
+
+  const healthy = {
+    id: 'b', config: { name: 'b', token: 't', cookie: 'c' }, file: 'b.json', cooldownUntil: 0,
+  };
+  const okView = serverInternals.accountStatus(healthy);
+  assert.equal(okView.ready, true);
+  assert.equal(okView.status, 'ready');
 });
 
 test('session TTL env override is read at startup and rejects nonsense', () => {

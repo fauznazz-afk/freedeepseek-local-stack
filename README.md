@@ -1118,7 +1118,8 @@ Full table: [docs/models.md](docs/models.md).
 | `DEEPSEEK_REQUEST_DEADLINE_MS` | `120000` | Per-request deadline |
 | `DEEPSEEK_MAX_CONCURRENT` | `24` | Process-wide cap. Real parallelism is the number of idle logins |
 | `DEEPSEEK_ACCOUNT_LOCK_WAIT_MS` | `120000` | How long a second chat waits for a busy login |
-| `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | Cooldown after 401, 403, or a rate limit without `Retry-After` |
+| `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | Cooldown after 401, 403, or a rate limit without `Retry-After`. DeepSeek throttles a browser session with "Слишком частые сообщения" — no header, so proxy defaults to 10 minutes. Lower at own risk. |
+| `DEEPSEEK_COOLDOWN_STATE_PATH` | `./data/cooldowns.json` | Where per-account cooldowns are persisted. A restart restores the cooldown so you cannot "restart your way out" of a throttle. Set empty to disable. |
 | `DEEPSEEK_GUARD_BLOCKS` | on | Fallback for the prompt guard blocks. `off` disables them process-wide; prefer the per-request `guard_blocks` body field. See [Refactor mode](#3-refactor-mode--per-request-guard-block-opt-out) |
 | `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one DeepSeek chat is reused before the proxy opens a fresh one and replays local history. Default 2 hours. See [Session lifetime](#session-lifetime-and-its-limits) |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Messages per chat before a forced reset. Minimum 2 |
