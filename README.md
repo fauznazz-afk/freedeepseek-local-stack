@@ -59,6 +59,7 @@ One model is on the site today: **DeepSeek-V4.1-Flash**. The native Web Search b
 - [Rootless Podman](#rootless-podman)
 - [Diagnostics / doctor](#diagnostics--doctor)
 - [Session reuse](#session-reuse)
+- [Long-term memory](#long-term-memory)
 - [Multi-account pool](#multi-account-pool)
 - [Dashboard](#dashboard)
 - [Updates](#updates)
@@ -493,7 +494,7 @@ FreeDeepseekAPI does not open a new DeepSeek chat on every HTTP request.
 - The standing system prompt and the tool list go upstream **once**. Later turns from OpenCode, Claude Code, and Codex send only the new user or tool turn.
 - A changed system prompt is sent again.
 - An empty reply, a broken tool-call, or a timeout **keeps** the live chat. Those failures used to open a new chat and resend the whole prompt. They do not anymore.
-- A new chat starts when the session is missing, the chain hits 100 messages, the chat is older than 2 hours, DeepSeek says the prompt is too long, or you call `/reset-session`.
+- A new chat starts when the session is missing, the chain hits `DEEPSEEK_MAX_MESSAGE_DEPTH`, the chat is older than `DEEPSEEK_SESSION_TTL_MS`, DeepSeek says the prompt is too long, or you call `/reset-session`.
 - Long prompts are cut to `DEEPSEEK_MAX_PROMPT_CHARS` (default 800,000 characters) before they are sent. The start of the task, the latest tool results, and the tool reminder stay. Compaction is structured, not a blind head/tail cut: see [Long-context memory](#2-long-context-memory--libcontextjs).
 - If the client already sent a multi-turn history, the proxy does not paste its own recovery history a second time.
 - An empty reply is retried up to `DEEPSEEK_MAX_RETRIES` times (default 2). Each retry uses a smaller slice of context, still on the same chat when that chat is alive.
@@ -530,6 +531,82 @@ A reset keeps the proxy's copy of the conversation and replays it into the next 
 You will still see chats in the DeepSeek website. The proxy uses the Web Chat API, and DeepSeek stores the real chats. Session reuse only stops the proxy from opening a new one when the current chain is still good.
 
 A message whose text is exactly `/new` resets that agent's remote chat instead of sending the text to the model.
+
+### Session lifetime and its limits
+
+A session is a *working* memory, not a permanent one. Both limits are configurable now, but neither removes the ceiling:
+
+| Limit | Default | Env var |
+|---|---|---|
+| Chat reused for | 2 hours | `DEEPSEEK_SESSION_TTL_MS` |
+| Messages per chat | 100 | `DEEPSEEK_MAX_MESSAGE_DEPTH` |
+| Idle session kept on disk | 2 × TTL | `DEEPSEEK_SESSION_IDLE_EVICT_MS` |
+| Sessions loaded at startup | 500 | `DEEPSEEK_MAX_SESSIONS` |
+
+```bash
+# A deliberately long coding session: 24 hours, 500 messages.
+DEEPSEEK_SESSION_TTL_MS=86400000 DEEPSEEK_MAX_MESSAGE_DEPTH=500 npm start
+```
+
+`GET /health` reports the effective values under `session_reuse`, so you can confirm an override took effect without reading the source.
+
+Raising these helps a long task survive. It does not create long-term memory: the session is still scoped to one agent key and still expires eventually. For facts that must outlive the session, use the system prompt — see below.
+
+---
+
+## Long-term memory
+
+The proxy has **no** long-term memory, and that is by design. It is a transport layer: it forwards a conversation and replays a bounded local history when the remote chat dies. It does not decide what is worth remembering.
+
+Long-term memory comes from the **system prompt**, because the system prompt is re-sent on every request regardless of session. Anything you put there is known to every future session.
+
+| Layer | Holds | Lifetime |
+|---|---|---|
+| Session store | Today's conversation | 2 hours (configurable) |
+| System prompt / `AGENTS.md` | Standing rules: style, conventions, prohibitions | Until you edit the file |
+| `MEMORY.md` per project | Durable facts: ports, commands, decisions, traps | Until you edit the file |
+
+### Verified behaviour
+
+Two brand-new sessions with no shared history, given the same system-prompt memo, both knew the fact. The same question with no memo returned `UNKNOWN`:
+
+```
+fresh session A  -> KUNING-MERAK-55
+fresh session B  -> KUNING-MERAK-55
+no system prompt -> UNKNOWN
+```
+
+A memo of 2,000, 20,000, and 80,000 characters was recalled accurately with the fact placed at the very end — the hardest position. Treat ~80,000 characters as the practical ceiling for a memo that must be remembered precisely; beyond that, compaction starts cutting.
+
+### Setting it up
+
+OpenCode already reads `~/.config/opencode/AGENTS.md` on every session. Add the memory rules there (a `durable-memory` section is included in this setup) and keep a `MEMORY.md` in each project root:
+
+```markdown
+# Project Acme Billing
+
+## Facts
+- DB: Postgres 16, port 5433 (not the default)
+- Deploy staging: ./scripts/deploy.sh staging
+
+## Commands
+- Tests: `npm run test:unit` — never `npm test`, that also runs browser tests
+
+## Decisions
+- 2026-10-29 — Chose 9router for multi-provider routing; revisit only if we drop
+  the second provider.
+
+## Traps
+- Running `npm run seed` twice duplicates rows. Truncate first.
+```
+
+A starter template lives at `~/.config/opencode/MEMORY.template.md`.
+
+### The honest limitation
+
+Nothing here is automatic. The model does not remember and then save; either you write to the file, or you instruct the agent to write to it. The rule that makes it work is in `AGENTS.md`: *read `MEMORY.md` before your first change, append when you learn something durable*.
+
+Memory is the file, not the model.
 
 ---
 
@@ -949,6 +1026,10 @@ Full table: [docs/models.md](docs/models.md).
 | `DEEPSEEK_ACCOUNT_LOCK_WAIT_MS` | `120000` | How long a second chat waits for a busy login |
 | `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | Cooldown after 401, 403, or a rate limit without `Retry-After` |
 | `DEEPSEEK_GUARD_BLOCKS` | on | Fallback for the prompt guard blocks. `off` disables them process-wide; prefer the per-request `guard_blocks` body field. See [Refactor mode](#3-refactor-mode--per-request-guard-block-opt-out) |
+| `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one DeepSeek chat is reused before the proxy opens a fresh one and replays local history. Default 2 hours. See [Session lifetime](#session-lifetime-and-its-limits) |
+| `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Messages per chat before a forced reset. Minimum 2 |
+| `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | How long an idle session survives on disk across restarts |
+| `DEEPSEEK_MAX_SESSIONS` | `500` | Session cap loaded from disk at startup |
 | `TRUST_PROXY` | off | If `1`, the client IP is taken from `X-Forwarded-For` |
 | `MAX_REQUEST_BODY_BYTES` | `31457280` | Maximum JSON body, including base64 images |
 | `NON_INTERACTIVE` / `SKIP_ACCOUNT_MENU` | off | Skip the launch menu |

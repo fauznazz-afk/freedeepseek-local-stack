@@ -2016,3 +2016,35 @@ test('audit srv-tools-4: extractScreenshotPaths only reports paths from the curr
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('session limits are configurable, with the old defaults preserved', () => {
+  // The 2h / 100-message pair was a hardcoded guess. It is now env-driven, but
+  // the defaults must not drift: existing deployments depend on them.
+  const { SESSION_TTL_MS, MAX_MESSAGE_DEPTH, SESSION_IDLE_EVICT_MS, MAX_SESSIONS_ON_DISK } = serverInternals;
+  assert.equal(SESSION_TTL_MS, 2 * 60 * 60 * 1000, 'default TTL must stay 2 hours');
+  assert.equal(MAX_MESSAGE_DEPTH, 100, 'default message depth must stay 100');
+  assert.equal(SESSION_IDLE_EVICT_MS, SESSION_TTL_MS * 2, 'idle eviction must default to 2x the TTL');
+  assert.equal(MAX_SESSIONS_ON_DISK, 500, 'default session cap must stay 500');
+});
+
+test('session TTL env override is read at startup and rejects nonsense', () => {
+  const { execFileSync, spawnSync } = require('child_process');
+  const script = `
+    const s = require(${JSON.stringify(path.join(__dirname, '..', 'server.js'))}).__test;
+    process.stdout.write(JSON.stringify({ ttl: s.SESSION_TTL_MS, depth: s.MAX_MESSAGE_DEPTH }));
+  `;
+  const run = (env) => execFileSync(process.execPath, ['-e', script], {
+    env: { ...process.env, ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+  });
+
+  const long = JSON.parse(run({ DEEPSEEK_SESSION_TTL_MS: String(24 * 60 * 60 * 1000), DEEPSEEK_MAX_MESSAGE_DEPTH: '500' }));
+  assert.equal(long.ttl, 24 * 60 * 60 * 1000, 'a 24h TTL must be honoured');
+  assert.equal(long.depth, 500, 'a 500-message depth must be honoured');
+
+  // A negative or non-numeric value must fail loudly rather than silently becoming 0.
+  const bad = spawnSync(process.execPath, ['-e', script], {
+    env: { ...process.env, DEEPSEEK_SESSION_TTL_MS: 'banana' }, encoding: 'utf8',
+  });
+  assert.notEqual(bad.status, 0, 'a non-numeric TTL must abort startup');
+  assert.match(String(bad.stderr || ''), /non-negative number/, 'the error must name the bad variable');
+});

@@ -228,7 +228,7 @@ function loadSessions() {
         const data = JSON.parse(raw);
         const now = Date.now();
         const entries = Object.entries(data);
-        const maxSessions = 500;
+        const maxSessions = MAX_SESSIONS_ON_DISK;
         // Sort by most recent activity first
         entries.sort((a, b) => (b[1].lastActivityAt || 0) - (a[1].lastActivityAt || 0));
         let loaded = 0;
@@ -239,7 +239,7 @@ function loadSessions() {
             }
             if (!session || typeof session !== 'object') continue;
             const idleMs = now - (session.lastActivityAt || 0);
-            if (idleMs > SESSION_TTL_MS * 2) {
+            if (idleMs > SESSION_IDLE_EVICT_MS) {
                 console.log(`[DS-API] Skipping stale session ${agentId}: idle ${Math.round(idleMs / 60000)}m`);
                 continue;
             }
@@ -285,8 +285,20 @@ const MAX_HISTORY_LENGTH = 100;
 const MAX_HISTORY_CHARS = 400000;
 const HISTORY_ENTRY_PROMPT_CHARS = 12000;
 const HISTORY_ENTRY_ASSISTANT_CHARS = 12000;
-const MAX_MESSAGE_DEPTH = 100;  // auto-reset after this many messages
-const SESSION_TTL_MS = 2 * 60 * 60 * 1000;  // 2 hours
+// Session lifetime. These bound the *remote* DeepSeek chat: when either limit is
+// hit the proxy opens a fresh chat and replays its local history into it. They are
+// configurable because "2 hours" is a guess, not a DeepSeek rule - a long coding
+// session or a deliberately persistent agent may want a much longer chain.
+//
+// Note what this does NOT do: it does not give you long-term memory. A session is
+// still scoped to one agent key and still expires eventually. Durable facts belong
+// in the system prompt (AGENTS.md / MEMORY.md), not in the session store.
+const MAX_MESSAGE_DEPTH = Math.max(2, Math.floor(envNumber('DEEPSEEK_MAX_MESSAGE_DEPTH', 100)));
+const SESSION_TTL_MS = envNumber('DEEPSEEK_SESSION_TTL_MS', 2 * 60 * 60 * 1000);  // 2 hours
+// How long an idle session survives on disk between restarts. Defaults to twice the
+// TTL so a session that just expired upstream is still there to replay from.
+const SESSION_IDLE_EVICT_MS = envNumber('DEEPSEEK_SESSION_IDLE_EVICT_MS', SESSION_TTL_MS * 2);
+const MAX_SESSIONS_ON_DISK = Math.max(1, Math.floor(envNumber('DEEPSEEK_MAX_SESSIONS', 500)));
 
 // === DeepSeek Web API Config — loaded from external config file ===
 const DS_CONFIG_PATH = process.env.DEEPSEEK_AUTH_PATH || path.join(__dirname, 'deepseek-auth.json');
@@ -924,8 +936,9 @@ function getOrCreateAgentSession(agentId) {
 }
 
 // Evict idle sessions so the Map (keyed by client IP / user id) can't grow without
-// bound on a long-running process. Drops entries untouched for 2× the session TTL.
-function sweepIdleSessions(maxIdleMs = SESSION_TTL_MS * 2) {
+// bound on a long-running process. Drops entries untouched for the configured idle
+// window (default 2× the session TTL).
+function sweepIdleSessions(maxIdleMs = SESSION_IDLE_EVICT_MS) {
     const now = Date.now();
     let removed = 0;
     for (const [agentId, session] of sessions) {
@@ -4468,7 +4481,7 @@ const server = http.createServer(async (req, res) => {
             chat_locks: listAccountChatLocks(),
             accounts: accounts.map(accountStatus),
             config_ready: hasAuthConfig(),
-            session_reuse: { strategy: 'sticky per x-agent-session/user', ttl_minutes: Math.round(SESSION_TTL_MS / 60000), max_messages: MAX_MESSAGE_DEPTH, reset_all: 'POST /reset-session?agent=all' },
+            session_reuse: { strategy: 'sticky per x-agent-session/user', ttl_minutes: Math.round(SESSION_TTL_MS / 60000), max_messages: MAX_MESSAGE_DEPTH, idle_evict_minutes: Math.round(SESSION_IDLE_EVICT_MS / 60000), max_sessions: MAX_SESSIONS_ON_DISK, reset_all: 'POST /reset-session?agent=all' },
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(health));
@@ -5764,6 +5777,10 @@ module.exports = {
         extractAnchors: contextLib.extractAnchors,
         hasExplicitConversationHistory,
         buildRecoveryHistoryPrefix,
+        SESSION_TTL_MS,
+        SESSION_IDLE_EVICT_MS,
+        MAX_MESSAGE_DEPTH,
+        MAX_SESSIONS_ON_DISK,
         buildBoundedPrompt,
         buildRetryPrompt,
         isContinuationRecoverySafe,
