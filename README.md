@@ -181,6 +181,18 @@ DeepSeek directly instead of through the proxy.
 
 **Quick use on Windows:**
 
+If you install the `deepseek-local` shim (one `.cmd` file, see
+[local-stack/README.md](local-stack/README.md#memasang-perintah-deepseek-local)):
+
+```
+deepseek-local            start proxy + 9router
+deepseek-local stop       stop both
+deepseek-local status     is it up, and which 9router build is serving
+deepseek-local verify     prove the whole chain end to end
+```
+
+Without the shim:
+
 ```bat
 local-stack\Start-All.bat     :: start everything
 local-stack\Verify-All.bat    :: check the whole chain

@@ -28,7 +28,9 @@ foreach ($name in 'proxy', 'router') {
 # respawns detached), so killing only the child looks like "9router won't start".
 # Kill supervisors first (shallowest first), then descendants, and repeat until
 # nothing matches - a respawn between two passes is caught by the next one.
-$patterns = 'node_modules[\\/]9router[\\/](cli\.js|app[\\/]custom-server\.js)|FreeDeepseekAPI[\\/](server\.js|scripts[\\/]start\.js)'
+# The pattern covers both installs: the global one under node_modules\9router and
+# the local build under 9router-source\cli\app (which the launcher prefers).
+$patterns = 'node_modules[\\/]9router[\\/](cli\.js|app[\\/]custom-server\.js)|9router-source[\\/]cli[\\/]app[\\/]custom-server\.js|FreeDeepseekAPI[\\/](server\.js|scripts[\\/]start\.js)'
 
 for ($pass = 1; $pass -le 4; $pass++) {
     $victims = @(Get-CimInstance Win32_Process |

@@ -84,12 +84,47 @@ langsung, bukan lewat proxy.
 
 ## Cara pakai
 
+Kalau shim `deepseek-local` sudah dipasang (lihat bawah), satu perintah saja:
+
+```
+deepseek-local            nyalakan semua
+deepseek-local stop       matikan semua
+deepseek-local restart    matikan lalu nyalakan
+deepseek-local status     sedang jalan? 9router versi mana yang dipakai?
+deepseek-local verify     buktikan rantai penuh sampai CHAIN_OK
+```
+
+Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
+menjalankan proses kedua.
+
+Tanpa shim, pakai file .bat langsung:
+
 | Aksi | Perintah |
 |------|----------|
 | Nyalakan semua | `local-stack\Start-All.bat` |
 | Matikan semua | `local-stack\Stop-All.bat` |
 | Cek rantai penuh | `local-stack\Verify-All.bat` |
 | Nyalakan + re-patch | `powershell -File local-stack\start.ps1 -Patch` |
+
+### Memasang perintah `deepseek-local`
+
+Logika sebenarnya ada di `local-stack\deepseek-local.ps1`; shim di PATH hanya
+meneruskan argumen. Buat `%USERPROFILE%\.local\bin\deepseek-local.cmd`:
+
+```bat
+@echo off
+setlocal
+set "STACK_DIR=D:\FreeDeepseekAPI\local-stack"
+if not exist "%STACK_DIR%\deepseek-local.ps1" (
+    echo deepseek-local: cannot find "%STACK_DIR%\deepseek-local.ps1"
+    exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%STACK_DIR%\deepseek-local.ps1" %*
+exit /b %ERRORLEVEL%
+```
+
+Pastikan `%USERPROFILE%\.local\bin` ada di PATH. Kalau repo dipindah, cukup ubah
+`STACK_DIR` di satu file itu.
 
 Dashboard proxy: <http://127.0.0.1:9655/dashboard> · 9router: <http://127.0.0.1:20128>
 
