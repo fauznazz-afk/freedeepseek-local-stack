@@ -38,6 +38,6 @@ $env:DEEPSEEK_MAX_HISTORY_CHARS = "800000"
 # $env:DEEPSEEK_MAX_PROMPT_CHARS = "800000"
 
 # --- Accounts ---------------------------------------------------------------
-# DeepSeek throttles a browser login for ~10 minutes. Leave this alone unless
-# you are testing against a friendlier endpoint.
-# $env:DEEPSEEK_ACCOUNT_COOLDOWN_MS = "600000"
+# DeepSeek Web burst throttle usually resets in 15-30s. The proxy default of 10m
+# was too conservative; 30s allows fast recovery without long stalls.
+$env:DEEPSEEK_ACCOUNT_COOLDOWN_MS = "30000"
