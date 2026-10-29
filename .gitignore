@@ -33,3 +33,6 @@ Thumbs.db
 #   git clone https://github.com/serenhope/9router.git 9router-source
 9router-source/
 
+
+# Scratch files used while testing (never commit).
+local-stack/.tmp-*
