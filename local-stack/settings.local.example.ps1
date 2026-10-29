@@ -21,8 +21,12 @@ $env:DEEPSEEK_MAX_MESSAGE_DEPTH = "400"
 # How much local history is replayed into the replacement chat. These must move
 # with MAX_MESSAGE_DEPTH: raising depth alone still replays only 100 entries.
 # Defaults are 100 messages / 400000 chars.
+#
+# Kept at 800000 = the upstream prompt cap below. A larger budget buys nothing:
+# the prompt is capped anyway, so the excess would only be condensed away by
+# lib/context.js before sending.
 $env:DEEPSEEK_MAX_HISTORY_MESSAGES = "400"
-$env:DEEPSEEK_MAX_HISTORY_CHARS = "1200000"
+$env:DEEPSEEK_MAX_HISTORY_CHARS = "800000"
 
 # Idle sessions are kept on disk 2x the TTL by default; that follows the TTL
 # above, so it is left unset.

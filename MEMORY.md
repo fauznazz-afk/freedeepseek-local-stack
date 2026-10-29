@@ -42,14 +42,21 @@ to 9router. Runs on Windows on this machine.
   (`DEEPSEEK_MAX_HISTORY_MESSAGES` / `DEEPSEEK_MAX_HISTORY_CHARS`). They are the
   real limit on recovery: raising `DEEPSEEK_MAX_MESSAGE_DEPTH` alone still replays
   only the last 100 turns after a rollover, so the two must move together.
+- `2026-10-29` - An oversized recovery history is condensed, never dropped. It used
+  to be thrown away whenever the replay pushed the prompt past the cap, which
+  emptied a long session at exactly the moment recovery mattered (measured:
+  948,868 chars in, 46 chars out). Now it gets `HISTORY_BUDGET_SHARE` (35%) of the
+  prompt and is compacted by `lib/context.js`.
 - `2026-10-29` - Machine tuning lives in `local-stack\settings.local.ps1`
   (git-ignored, example shipped). `start.ps1` dot-sources it so the values reach
   the spawned proxy and survive reboots without re-exporting env vars. A broken
   file warns and falls back to defaults instead of blocking startup.
 - `2026-10-29` - This machine runs 7-day TTL / 400 messages / 400-message replay
-  over 1.2M chars. Verified live: a token set before `deepseek-local restart` was
-  still recalled after it, and a 10s TTL test proved rollover replays local
-  history rather than dropping it.
+  over 800k chars. The replay char budget is pinned to `DEEPSEEK_MAX_PROMPT_CHARS`:
+  anything above the prompt cap cannot be sent, so a larger budget only adds
+  material for `lib/context.js` to condense away. Verified live: a token set
+  before `deepseek-local restart` was still recalled after it, and a 10s TTL test
+  proved rollover replays local history rather than dropping it.
 - `2026-10-29` - Long-term memory lives in the system prompt (`AGENTS.md` +
   `MEMORY.md`), not in the session store. Measured ceiling for a memo that must be
   recalled precisely: ~80,000 characters.

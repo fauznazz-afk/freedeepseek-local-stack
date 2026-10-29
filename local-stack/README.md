@@ -152,21 +152,22 @@ Setelan yang dipakai di mesin ini:
 | `DEEPSEEK_SESSION_TTL_MS` | `604800000` | Chat DeepSeek dipakai 7 hari sebelum diganti |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `400` | 400 pesan per chat sebelum reset paksa |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `400` | 400 giliran lokal diputar ulang ke chat pengganti |
-| `DEEPSEEK_MAX_HISTORY_CHARS` | `1200000` | Anggaran karakter untuk pemutaran ulang itu |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `800000` | Anggaran karakter untuk pemutaran ulang itu |
 
 Dua yang terakhir harus naik bersama `DEEPSEEK_MAX_MESSAGE_DEPTH`. Menaikkan
 depth saja tidak ada gunanya: saat chat diganti, proxy memutar ulang riwayat
 lokal, dan pemutaran itu dulu dipatok di 100 entri — sesi "400 pesan" tetap
 hanya memulihkan 100 giliran terakhir.
 
-Satu hal yang sudah diperbaiki: `DEEPSEEK_MAX_HISTORY_CHARS` di sini (1,2 juta)
-lebih besar dari batas prompt (`DEEPSEEK_MAX_PROMPT_CHARS`, 800 ribu). Dulu,
-kalau riwayat yang diputar ulang melebihi batas itu, seluruh blok riwayat
-dibuang — sesi panjang justru kehilangan semua ingatannya tepat saat pemulihan
-paling dibutuhkan. Sekarang riwayat dipadatkan ke sekitar sepertiga anggaran
-prompt, jadi awal sesi, bagian tengah yang penting, dan giliran terbaru tetap
-ada. Kalau mau menghemat, turunkan `DEEPSEEK_MAX_HISTORY_CHARS` ke ≤800000;
-angka di atas batas prompt tidak menambah apa pun selain bahan pemadatan.
+Anggaran karakter sengaja dipatok di `800000`, sama dengan
+`DEEPSEEK_MAX_PROMPT_CHARS`. Angka di atas batas prompt tidak menambah apa pun:
+prompt tetap dipotong di 800 ribu, jadi kelebihannya cuma jadi bahan pemadatan.
+
+Ini juga menutup bug yang ditemukan saat menguji: dulu, kalau riwayat yang
+diputar ulang melebihi batas prompt, seluruh blok riwayat dibuang — sesi panjang
+kehilangan semua ingatannya tepat saat pemulihan paling dibutuhkan. Sekarang
+riwayat dipadatkan ke sekitar sepertiga anggaran prompt, jadi awal sesi, bagian
+tengah yang penting, dan giliran terbaru tetap ada.
 
 Cek hasilnya benar-benar aktif, jangan percaya file saja:
 
@@ -176,7 +177,7 @@ deepseek-local status
 
 ```
   proxy    UP    port 9655  |  1 account(s), 1 ready
-                 session: ttl 7.0 days, 400 msgs, replays 400 msgs / 1200k chars
+                 session: ttl 7.0 days, 400 msgs, replays 400 msgs / 800k chars
 ```
 
 Atau `curl http://127.0.0.1:9655/health` dan lihat `session_reuse`.
