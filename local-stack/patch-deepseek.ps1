@@ -2,15 +2,28 @@
 <#
   Re-points the installed 9router build at the local FreeDeepseekAPI proxy.
   Safe to run repeatedly: files already patched are skipped, originals are backed up once.
-  Run this again after every `npm i -g 9router@latest`.
+  Run this again after every `npm i -g 9router@latest`, and after every rebuild of
+  9router-source/ (the build regenerates the JS chunks this script rewrites).
 #>
 [CmdletBinding()]
 param(
     [string]$ProxyBase = 'http://127.0.0.1:9655',
-    [string]$AppDir = "$env:APPDATA\npm\node_modules\9router\app"
+    [string]$AppDir
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Same resolution order as start.ps1 so -Patch always patches the build the
+# launcher will actually run: explicit -AppDir, then the local checkout build,
+# then the global npm install.
+if (-not $AppDir) {
+    $localBuild = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..')).Path '9router-source\cli\app'
+    if (Test-Path (Join-Path $localBuild '.next-cli-build\server')) {
+        $AppDir = $localBuild
+    } else {
+        $AppDir = Join-Path $env:APPDATA 'npm\node_modules\9router\app'
+    }
+}
 
 if (-not (Test-Path $AppDir)) { throw "9router app dir not found: $AppDir (is 9router installed globally?)" }
 

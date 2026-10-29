@@ -12,9 +12,10 @@ to 9router. Runs on Windows on this machine.
 - Node 18+, zero npm dependencies in the proxy
 - Auth: `deepseek-auth.json` at repo root, git-ignored. Never commit it.
 - Local data lives in `data/sessions.json`, also git-ignored
-- 9router runtime: `%APPDATA%\npm\node_modules\9router\app` (global install, v0.5.112)
-- 9router state: `%APPDATA%\9router` (SQLite + patch backups)
-- 9router source checkout: `9router-source/` (v0.5.330, git-ignored, not on runtime path)
+- 9router runtime: `9router-source\cli\app` (local build, v0.5.330) - launcher prefers it
+- 9router fallback: `%APPDATA%\npm\node_modules\9router\app` (global install, v0.5.112)
+- 9router state: `%APPDATA%\9router` (SQLite + patch backups), shared by both builds
+- 9router source checkout: `9router-source/` (v0.5.330, git-ignored)
 
 ## Commands
 
@@ -41,9 +42,20 @@ to 9router. Runs on Windows on this machine.
 
 ## Traps
 
-- **The launcher does not run `9router-source/`.** `start.ps1` launches
-  `custom-server.js` from the global npm install. Editing the source checkout has
-  no effect until you build it and set `$env:NINEROUTER_APP` to its `app/` dir.
+- **Rebuilding 9router un-patches it.** `patch-deepseek.ps1` rewrites compiled JS
+  chunks that contain `https://api.deepseek.com/...`. `npm run cli:pack` regenerates
+  those chunks with the upstream URLs, so always re-run the patch after a build or
+  9router calls DeepSeek directly instead of through the proxy.
+- **`build-cli.js` output is not self-contained.** It copies only a few `src/` files,
+  but `custom-server.js` loads `src/dashboardGuard.js`, `src/shared/services/
+  telegramBackup.js`, `src/sse/services/backgroundTokenRefresh.js`,
+  `src/lib/db/repos/securityLogRepo.js`, `src/lib/auth/dashboardSession.js` and
+  `scripts/auth-guard-hooks.mjs` by absolute path, probing parent dirs. Copy the full
+  `src/`, `scripts/`, `CHANGELOG.md`, and mirror `node_modules/next` (assemble.sh does
+  this on Linux). Without it: `AuthGuard load failed: ENOENT ...next\server.js`.
+- **`npm install` fails on Node 24+ because of `better-sqlite3`.** It has no prebuilt
+  binary for Node 25 and node-gyp needs a VS C++ workload. Use `--ignore-scripts`: the
+  driver skips `better-sqlite3` on Node 24+ anyway and uses built-in `node:sqlite`.
 - **9router drops client headers.** `x-agent-session` and
   `x-deepseek-guard-blocks` never reach the proxy through 9router. Use body fields
   (`user`, `guard_blocks`) instead.

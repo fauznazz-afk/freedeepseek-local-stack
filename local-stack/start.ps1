@@ -19,10 +19,22 @@ $ErrorActionPreference = 'Stop'
 # $env:FREEDEEPSEEK_DIR when the proxy is installed elsewhere.
 $proxyDir = $env:FREEDEEPSEEK_DIR
 if (-not $proxyDir) { $proxyDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
-# 9router runs from the global npm install by default. Override with
-# $env:NINEROUTER_APP when you built it from 9router-source/ instead.
+# 9router resolution order:
+#   1. $env:NINEROUTER_APP       - explicit override, always wins
+#   2. 9router-source/cli/app    - a build made from the checkout in this repo
+#   3. global npm install        - `npm i -g 9router`
+# The local build wins over the global one so editing 9router-source/ and
+# rebuilding actually takes effect. Anyone who cloned the repo without building
+# 9router still falls through to the global install and works.
 $routerApp = $env:NINEROUTER_APP
-if (-not $routerApp) { $routerApp = Join-Path $env:APPDATA 'npm\node_modules\9router\app' }
+if (-not $routerApp) {
+    $localBuild = Join-Path $proxyDir '9router-source\cli\app'
+    if (Test-Path (Join-Path $localBuild 'custom-server.js')) {
+        $routerApp = $localBuild
+    } else {
+        $routerApp = Join-Path $env:APPDATA 'npm\node_modules\9router\app'
+    }
+}
 $runDir    = Join-Path $PSScriptRoot 'run'
 $logDir    = Join-Path $PSScriptRoot 'logs'
 $node      = (Get-Command node.exe -ErrorAction Stop).Source

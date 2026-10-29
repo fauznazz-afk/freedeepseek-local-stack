@@ -16,24 +16,71 @@ jadi repo bisa dipindah/di-clone di mana saja. Override lewat `$env:FREEDEEPSEEK
 
 ## Di mana 9router sebenarnya jalan
 
-Ini sering bikin bingung, jadi saya tulis eksplisit:
+`start.ps1` memilih 9router dengan urutan ini:
 
-| Apa | Lokasi |
-|-----|--------|
-| 9router yang dijalankan launcher | `%APPDATA%\npm\node_modules\9router\app` (hasil `npm i -g`) |
-| State runtime 9router | `%APPDATA%\9router` (SQLite, backup patch) |
-| Source 9router (opsional) | `9router-source/` di root repo |
+| Urutan | Lokasi | Kapan dipakai |
+|--------|--------|---------------|
+| 1 | `$env:NINEROUTER_APP` | kamu set sendiri, selalu menang |
+| 2 | `9router-source\cli\app` | ada hasil build dari checkout di repo ini |
+| 3 | `%APPDATA%\npm\node_modules\9router\app` | hasil `npm i -g 9router` (cadangan) |
 
-`start.ps1` menjalankan `custom-server.js` dari **instalasi global**, bukan dari
-`9router-source/`. Source checkout itu hanya supaya kodenya ada di satu tempat —
-tidak ada di jalur runtime, dan di-ignore git karena clone terpisah.
+Build lokal didahulukan supaya mengedit `9router-source/` lalu build ulang benar-benar
+berpengaruh. Kalau kamu clone repo ini tapi belum pernah build 9router, launcher
+otomatis pakai instalasi global dan tetap jalan.
 
-Kalau kamu build 9router dari checkout itu dan mau launcher memakainya:
+`patch-deepseek.ps1` memakai urutan yang sama, jadi `-Patch` selalu mem-patch build
+yang benar-benar akan dijalankan.
+
+State runtime 9router tetap di luar keduanya: `%APPDATA%\9router` (SQLite, backup
+patch). Jadi upgrade 9router tidak menyentuh akun atau setting-mu.
+
+`9router-source/` di-ignore git karena clone terpisah dengan histori sendiri.
+
+### Build 9router di Windows (Node 24+)
+
+`npm run cli:pack` adalah build resmi; hasilnya `cli/app` dengan layout sama seperti
+paket npm. Di Node 24+ ada dua penyesuaian:
 
 ```powershell
-$env:NINEROUTER_APP = "D:\FreeDeepseekAPI\9router-source\app"
-powershell -File local-stack\start.ps1
+cd 9router-source
+npm install --ignore-scripts              # better-sqlite3 tidak bisa compile di Node 24+
+cd cli; npm install --ignore-scripts; cd ..  # menyediakan esbuild untuk build MITM
+npm run cli:pack                          # -> 9router-source\cli\app
 ```
+
+`--ignore-scripts` aman: `src/lib/db/driver.js` melewati `better-sqlite3` di Node 24+
+(addon native-nya SIGSEGV di sana) dan memakai `node:sqlite` bawaan, tanpa compile.
+
+Setelah itu lengkapi bundle seperti yang dilakukan `assemble.sh` di Linux, karena
+`build-cli.js` hanya menyalin sebagian kecil `src/` padahal `custom-server.js`
+memuat beberapa modul lewat path absolut:
+
+```powershell
+cd 9router-source
+$app = "cli\app"
+Remove-Item "$app\src" -Recurse -Force; Copy-Item src "$app\src" -Recurse -Force
+Remove-Item "$app\scripts" -Recurse -Force; Copy-Item scripts "$app\scripts" -Recurse -Force
+Copy-Item CHANGELOG.md "$app\CHANGELOG.md" -Force
+Remove-Item "$app\node_modules\next" -Recurse -Force
+Copy-Item node_modules\next "$app\node_modules\next" -Recurse -Force
+```
+
+Tanpa empat salinan itu, build tetap start tapi gagal saat dipakai:
+`AuthGuard load failed: ENOENT ...node_modules\next\server.js`, atau server diam-diam
+membaca modul dari `9router-source/src` bukan dari foldernya sendiri.
+
+Terakhir arahkan build baru ke proxy, lalu restart:
+
+```powershell
+local-stack\patch-deepseek.ps1   # otomatis mendeteksi 9router-source\cli\app
+local-stack\Start-All.bat
+local-stack\Verify-All.bat       # harus berakhir CHAIN_OK
+```
+
+**Build ulang = patch ulang.** `patch-deepseek.ps1` menulis ulang chunk JS yang memuat
+`https://api.deepseek.com/...`, dan build ulang menghasilkan chunk baru dengan URL asli.
+Selalu jalankan patch lagi setelah build, kalau tidak 9router akan memanggil DeepSeek
+langsung, bukan lewat proxy.
 
 ## Cara pakai
 

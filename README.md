@@ -109,26 +109,75 @@ The proxy is the root of the repo. `local-stack/` is a helper layer: it starts t
 
 ### Where 9router actually runs from
 
-Worth knowing, because it is not where you might expect:
+`local-stack/start.ps1` picks 9router in this order:
 
-| What | Path |
-|---|---|
-| 9router the launcher runs | `%APPDATA%\npm\node_modules\9router\app` (installed via `npm i -g 9router`) |
-| 9router runtime state | `%APPDATA%\9router` (SQLite DB, patch backups) |
-| 9router source, optional | `9router-source/` in this repo |
+| Order | Path | When |
+|---|---|---|
+| 1 | `$env:NINEROUTER_APP` | you set it explicitly; always wins |
+| 2 | `9router-source/cli/app` | a build exists from the checkout in this repo |
+| 3 | `%APPDATA%\npm\node_modules\9router\app` | `npm i -g 9router` (fallback) |
 
-`local-stack/start.ps1` launches `custom-server.js` from the **global install**, not from `9router-source/`. The source checkout is there so the code is in one place and easy to inspect or patch; it is not on the runtime path. It is also git-ignored, because it is a separate clone with its own history:
+The local build wins so that editing `9router-source/` and rebuilding actually takes
+effect. If you cloned the repo but never built 9router, the launcher falls through to
+the global install and still works. `patch-deepseek.ps1` resolves the target the same
+way, so `-Patch` always patches the build that will run.
+
+9router runtime state lives outside both, in `%APPDATA%\9router` (SQLite DB, patch
+backups), so upgrading 9router does not touch your accounts or settings.
+
+`9router-source/` is git-ignored, because it is a separate clone with its own history:
 
 ```bash
 git clone https://github.com/serenhope/9router.git 9router-source
 ```
 
-If you build 9router from that checkout, point the launcher at it explicitly:
+### Building 9router from the checkout
+
+`npm run cli:pack` is the official build; it produces `cli/app`, which is the same
+layout as the published package. On Windows with Node 24+ two extra steps are needed:
 
 ```powershell
-# In local-stack/start.ps1 the target is $routerApp
-$env:NINEROUTER_APP = "D:\FreeDeepseekAPI\9router-source\app"
+cd 9router-source
+npm install --ignore-scripts   # better-sqlite3 cannot compile on Node 24+; it is not used
+cd cli; npm install --ignore-scripts; cd ..   # provides esbuild for the MITM build step
+npm run cli:pack               # -> 9router-source/cli/app  (a few minutes)
 ```
+
+`--ignore-scripts` is safe here: `src/lib/db/driver.js` skips `better-sqlite3`
+entirely on Node 24+ (the native addon SIGSEGVs there) and uses the built-in
+`node:sqlite` instead, which needs no compilation.
+
+Then finish the bundle the way `assemble.sh` does on Linux — `build-cli.js` copies only
+a handful of `src/` files, but `custom-server.js` loads several modules by absolute path:
+
+```powershell
+cd 9router-source
+$app = "cli\app"
+Remove-Item "$app\src" -Recurse -Force; Copy-Item src "$app\src" -Recurse -Force
+Remove-Item "$app\scripts" -Recurse -Force; Copy-Item scripts "$app\scripts" -Recurse -Force
+Copy-Item CHANGELOG.md "$app\CHANGELOG.md" -Force
+Remove-Item "$app\node_modules\next" -Recurse -Force
+Copy-Item node_modules\next "$app\node_modules\next" -Recurse -Force
+```
+
+Skipping those four copies gives a build that starts but fails at runtime:
+`AuthGuard load failed: ENOENT ...node_modules\next\server.js` (Next.js output tracing
+prunes the full `next` package) or a server that silently reads modules out of
+`9router-source/src` instead of its own folder.
+
+Finally re-point the new build at the proxy, then restart:
+
+```powershell
+local-stack\patch-deepseek.ps1      # auto-detects 9router-source\cli\app
+local-stack\Start-All.bat
+local-stack\Verify-All.bat          # must end with CHAIN_OK
+```
+
+**Rebuild = re-patch.** `patch-deepseek.ps1` rewrites the compiled JS chunks that hold
+`https://api.deepseek.com/...`, and a rebuild regenerates those chunks with the
+upstream URLs. Always run the patch again after a build, or 9router will talk to
+DeepSeek directly instead of through the proxy.
+
 
 **Quick use on Windows:**
 

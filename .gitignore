@@ -16,6 +16,8 @@ data/
 # PID files and service logs written by local-stack/start.ps1.
 local-stack/logs/
 local-stack/run/
+# State snapshots taken before risky upgrades (SQLite DB copies, credentials).
+local-stack/.backup-9router-state-*/
 # Editor/OS noise.
 *.bak
 *.bak-*
