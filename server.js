@@ -335,6 +335,10 @@ const CONTEXT_OVERFLOW_MIN_CHARS = 8000;
 const MAX_OVERFLOW_RETRIES = 3;
 const INSTANT_EMPTY_MS = 1500;
 const AUTO_COMPACT_RATIO = 0.90; // compact when prompt exceeds 85% of max
+// Share of the upstream prompt cap a replayed recovery history may claim. The
+// history is a hint, so it must not crowd out the live conversation; but it must
+// also not be dropped wholesale when it overflows, which is what used to happen.
+const HISTORY_BUDGET_SHARE = 0.35;
 const AUTO_COMPACT_MIN_CHARS = 20000;
 const configuredPromptChars = Number(process.env.DEEPSEEK_MAX_PROMPT_CHARS);
 const MAX_UPSTREAM_PROMPT_CHARS = Number.isFinite(configuredPromptChars)
@@ -3172,34 +3176,46 @@ function buildBoundedPrompt(systemPrompt, historyPrefix, conversationPrompt, max
     const conversation = String(conversationPrompt || '').trim();
     const original = system ? `${system}\n\n${history}${conversation}` : `${history}${conversation}`;
     const safeMax = Math.max(1, Math.floor(Number(maxChars) || MAX_UPSTREAM_PROMPT_CHARS));
+    const separatorLength = system && conversation ? 2 : 0;
     if (original.length <= safeMax) {
         return { prompt: original, compacted: false, historyDropped: false, originalChars: original.length, promptChars: original.length };
     }
 
-    // Server-side history is only a recovery hint. Drop it before truncating
-    // client-provided messages, which may already contain the same turns.
-    const historyDropped = history.length > 0;
+    // Server-side history is only a recovery hint, so it yields to the
+    // client-provided conversation and the system prompt. It must not vanish
+    // outright though: the replay budget (DEEPSEEK_MAX_HISTORY_CHARS) can exceed
+    // the upstream prompt cap, and dropping the whole block on overflow threw
+    // away every turn of a long session at exactly the moment recovery mattered.
+    // Give it a bounded share and condense it, which keeps the opening task, the
+    // anchors and the newest turns instead of nothing.
+    const fixedLength = system.length + conversation.length + separatorLength;
+    const historyShare = Math.floor(safeMax * HISTORY_BUDGET_SHARE);
+    const historyBudget = fixedLength < safeMax
+        ? Math.min(history.length, historyShare, safeMax - fixedLength)
+        : 0;
+    const boundedHistory = historyBudget > 0 ? compactConversation(history, historyBudget) : '';
+    const historyDropped = history.length > 0 && boundedHistory.length === 0;
+    const historyBlock = boundedHistory ? `${boundedHistory}\n\n` : '';
     const currentConversation = conversation;
-    const separatorLength = system && currentConversation ? 2 : 0;
-    let systemBudget = system ? Math.floor((safeMax - separatorLength) * 0.5) : 0;
-    let conversationBudget = Math.max(0, safeMax - separatorLength - systemBudget);
+    let systemBudget = system ? Math.floor((safeMax - separatorLength - boundedHistory.length) * 0.5) : 0;
+    let conversationBudget = Math.max(0, safeMax - separatorLength - boundedHistory.length - systemBudget);
 
     // Give unused capacity from a short side to the other side.
     if (system.length < systemBudget) {
         systemBudget = system.length;
-        conversationBudget = Math.max(0, safeMax - separatorLength - systemBudget);
+        conversationBudget = Math.max(0, safeMax - separatorLength - boundedHistory.length - systemBudget);
     } else if (currentConversation.length < conversationBudget) {
         conversationBudget = currentConversation.length;
-        systemBudget = Math.max(0, safeMax - separatorLength - conversationBudget);
+        systemBudget = Math.max(0, safeMax - separatorLength - boundedHistory.length - conversationBudget);
     }
 
     // Preserve the start of the task/system instructions and the most recent
     // tool loop. The injected tool adapter lives at the end of systemPrompt.
     const boundedSystem = truncatePromptMiddle(system, systemBudget, 0.35);
     const boundedConversation = compactConversation(currentConversation, conversationBudget);
-    let bounded = boundedSystem && boundedConversation
-        ? `${boundedSystem}\n\n${boundedConversation}`
-        : (boundedSystem || boundedConversation);
+    let bounded = boundedSystem
+        ? `${boundedSystem}\n\n${historyBlock}${boundedConversation}`
+        : `${historyBlock}${boundedConversation}`;
     let autoCompacted = false;
     if (bounded.length > safeMax) {
         const compacted = autoCompactIfNeeded(bounded, safeMax);

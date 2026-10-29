@@ -159,6 +159,15 @@ depth saja tidak ada gunanya: saat chat diganti, proxy memutar ulang riwayat
 lokal, dan pemutaran itu dulu dipatok di 100 entri — sesi "400 pesan" tetap
 hanya memulihkan 100 giliran terakhir.
 
+Satu hal yang sudah diperbaiki: `DEEPSEEK_MAX_HISTORY_CHARS` di sini (1,2 juta)
+lebih besar dari batas prompt (`DEEPSEEK_MAX_PROMPT_CHARS`, 800 ribu). Dulu,
+kalau riwayat yang diputar ulang melebihi batas itu, seluruh blok riwayat
+dibuang — sesi panjang justru kehilangan semua ingatannya tepat saat pemulihan
+paling dibutuhkan. Sekarang riwayat dipadatkan ke sekitar sepertiga anggaran
+prompt, jadi awal sesi, bagian tengah yang penting, dan giliran terbaru tetap
+ada. Kalau mau menghemat, turunkan `DEEPSEEK_MAX_HISTORY_CHARS` ke ≤800000;
+angka di atas batas prompt tidak menambah apa pun selain bahan pemadatan.
+
 Cek hasilnya benar-benar aktif, jangan percaya file saja:
 
 ```

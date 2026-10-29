@@ -707,6 +707,31 @@ test('buildBoundedPrompt preserves task edges and drops duplicate recovery histo
   assert.doesNotMatch(bounded.prompt, /Recovered record/);
 });
 
+test('an oversized recovery history is condensed, never dropped wholesale', () => {
+  // Regression: the replay budget (DEEPSEEK_MAX_HISTORY_CHARS) can exceed the
+  // upstream prompt cap. When it did, buildBoundedPrompt threw the entire history
+  // away and a long session recovered nothing at exactly the moment recovery
+  // mattered. It must keep a condensed share instead.
+  const turns = 1500;
+  let history = '[Recovered record of this conversation from an earlier session.]\n\n';
+  for (let i = 0; i < turns; i++) {
+    history += `User: ${'u'.repeat(300)} [T${i}]\nAssistant: ${'a'.repeat(300)} [T${i}]\n\n`;
+  }
+  history += '[Continue from here]\n\n';
+  const conversation = 'User: what was the secret code?\n';
+  assert.ok(history.length > 800000, 'the fixture must overflow the cap');
+
+  const bounded = serverInternals.buildBoundedPrompt('SYSTEM PROMPT', history, conversation, 800000);
+
+  assert.ok(bounded.prompt.length <= 800000, 'the prompt must still fit the cap');
+  assert.equal(bounded.historyDropped, false, 'history must be condensed, not dropped');
+  assert.match(bounded.prompt, /Recovered record/, 'the history block must survive in condensed form');
+  assert.match(bounded.prompt, /\[T0\]/, 'the opening of the session must survive');
+  assert.match(bounded.prompt, new RegExp(`\\[T${turns - 1}\\]`), 'the newest replayed turn must survive');
+  assert.match(bounded.prompt, /what was the secret code/, 'the live turn must always survive');
+  assert.match(bounded.prompt, /SYSTEM PROMPT/, 'the system prompt must survive');
+});
+
 test('conversation compaction shrinks huge tool results and keeps the latest user turn', () => {
   const conversation = [
     'User: implement the player controller\n\n',

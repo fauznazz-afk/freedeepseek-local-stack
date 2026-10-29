@@ -583,6 +583,7 @@ FreeDeepseekAPI does not open a new DeepSeek chat on every HTTP request.
 - A new chat starts when the session is missing, the chain hits `DEEPSEEK_MAX_MESSAGE_DEPTH`, the chat is older than `DEEPSEEK_SESSION_TTL_MS`, DeepSeek says the prompt is too long, or you call `/reset-session`.
 - Long prompts are cut to `DEEPSEEK_MAX_PROMPT_CHARS` (default 800,000 characters) before they are sent. The start of the task, the latest tool results, and the tool reminder stay. Compaction is structured, not a blind head/tail cut: see [Long-context memory](#2-long-context-memory--libcontextjs).
 - If the client already sent a multi-turn history, the proxy does not paste its own recovery history a second time.
+- When the replayed recovery history alone would overflow that cap, it is condensed to about a third of the budget rather than dropped. Losing it entirely used to leave a long session with no memory at all, right when recovery mattered.
 - An empty reply is retried up to `DEEPSEEK_MAX_RETRIES` times (default 2). Each retry uses a smaller slice of context, still on the same chat when that chat is alive.
 
 Set the agent explicitly:
@@ -638,6 +639,8 @@ DEEPSEEK_SESSION_TTL_MS=86400000 DEEPSEEK_MAX_MESSAGE_DEPTH=500 \
 ```
 
 The two replay caps move with `DEEPSEEK_MAX_MESSAGE_DEPTH`, not independently. When a chat is replaced the proxy re-injects its local transcript; if the replay depth stayed at 100, a "500-message" session would still recover only the last 100 turns. Raise them together.
+
+Keep `DEEPSEEK_MAX_HISTORY_CHARS` at or below `DEEPSEEK_MAX_PROMPT_CHARS`. Anything above the prompt cap cannot be sent anyway, so it only decides how much gets condensed away: the replay is capped at about a third of the prompt budget and the rest is summarised by `lib/context.js`.
 
 `GET /health` reports the effective values under `session_reuse`, so you can confirm an override took effect without reading the source.
 
