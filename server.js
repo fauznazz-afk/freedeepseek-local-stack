@@ -277,12 +277,19 @@ function unkeyedAgentId(remoteAddr, userAgent) {
     }
     return id;
 }
-const MAX_HISTORY_LENGTH = 100;
 // Replay history budget. 100k chars was roughly a quarter of a real coding
 // session, so the transcript handed back to a reset session was too thin to
 // resume from. Raised to 400k (well inside the 800k upstream prompt cap) and
 // paired with per-entry caps so one huge paste cannot evict everything else.
-const MAX_HISTORY_CHARS = 400000;
+//
+// Both caps are configurable because they are the real limit on how much a long
+// session can recover after a rollover: MAX_MESSAGE_DEPTH decides how often the
+// remote chat is replaced, and these decide how much of the transcript survives
+// that replacement. Raising one without the other gains nothing - a 400-message
+// depth still replays only the last 100 entries if MAX_HISTORY_LENGTH stays 100.
+// Defaults are unchanged so existing behaviour is identical unless opted in.
+const MAX_HISTORY_LENGTH = Math.max(2, Math.floor(envNumber('DEEPSEEK_MAX_HISTORY_MESSAGES', 100)));
+const MAX_HISTORY_CHARS = Math.max(1000, Math.floor(envNumber('DEEPSEEK_MAX_HISTORY_CHARS', 400000)));
 const HISTORY_ENTRY_PROMPT_CHARS = 12000;
 const HISTORY_ENTRY_ASSISTANT_CHARS = 12000;
 // Session lifetime. These bound the *remote* DeepSeek chat: when either limit is
@@ -4481,7 +4488,7 @@ const server = http.createServer(async (req, res) => {
             chat_locks: listAccountChatLocks(),
             accounts: accounts.map(accountStatus),
             config_ready: hasAuthConfig(),
-            session_reuse: { strategy: 'sticky per x-agent-session/user', ttl_minutes: Math.round(SESSION_TTL_MS / 60000), max_messages: MAX_MESSAGE_DEPTH, idle_evict_minutes: Math.round(SESSION_IDLE_EVICT_MS / 60000), max_sessions: MAX_SESSIONS_ON_DISK, reset_all: 'POST /reset-session?agent=all' },
+            session_reuse: { strategy: 'sticky per x-agent-session/user', ttl_minutes: Math.round(SESSION_TTL_MS / 60000), max_messages: MAX_MESSAGE_DEPTH, idle_evict_minutes: Math.round(SESSION_IDLE_EVICT_MS / 60000), max_sessions: MAX_SESSIONS_ON_DISK, replay_messages: MAX_HISTORY_LENGTH, replay_chars: MAX_HISTORY_CHARS, reset_all: 'POST /reset-session?agent=all' },
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(health));
@@ -5781,6 +5788,8 @@ module.exports = {
         SESSION_IDLE_EVICT_MS,
         MAX_MESSAGE_DEPTH,
         MAX_SESSIONS_ON_DISK,
+        MAX_HISTORY_LENGTH,
+        MAX_HISTORY_CHARS,
         buildBoundedPrompt,
         buildRetryPrompt,
         isContinuationRecoverySafe,

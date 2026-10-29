@@ -45,6 +45,20 @@ if (-not (Test-Path (Join-Path $proxyDir 'server.js'))) {
 
 New-Item -ItemType Directory -Path $runDir, $logDir -Force | Out-Null
 
+# Local tuning lives in settings.local.ps1 (git-ignored). Loading it here means
+# the values apply to the proxy process this script spawns, so they survive
+# reboots without the user re-exporting anything. A broken file must not stop
+# the stack from starting: warn and continue with defaults.
+$settingsFile = Join-Path $PSScriptRoot 'settings.local.ps1'
+if (Test-Path $settingsFile) {
+    try {
+        . $settingsFile
+    } catch {
+        Write-Host "[warn  ] $settingsFile failed to load: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "[warn  ] continuing with built-in defaults" -ForegroundColor Yellow
+    }
+}
+
 function Test-Port([int]$Port) {
     # Fast probe: TcpClient with a short timeout, unlike Test-NetConnection which
     # can stall for seconds per call and made the launcher look hung.

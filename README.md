@@ -186,7 +186,8 @@ If you install the `deepseek-local` shim (one `.cmd` file, see
 
 ```
 deepseek-local            start proxy + 9router
-deepseek-local stop       stop both
+deepseek-local off        stop both (alias: stop)
+deepseek-local restart    stop, wait for the ports to free, then start
 deepseek-local status     is it up, and which 9router build is serving
 deepseek-local verify     prove the whole chain end to end
 ```
@@ -625,13 +626,18 @@ A session is a *working* memory, not a permanent one. Both limits are configurab
 |---|---|---|
 | Chat reused for | 2 hours | `DEEPSEEK_SESSION_TTL_MS` |
 | Messages per chat | 100 | `DEEPSEEK_MAX_MESSAGE_DEPTH` |
+| History replayed into a replacement chat | 100 messages | `DEEPSEEK_MAX_HISTORY_MESSAGES` |
+| History replay budget | 400000 chars | `DEEPSEEK_MAX_HISTORY_CHARS` |
 | Idle session kept on disk | 2 × TTL | `DEEPSEEK_SESSION_IDLE_EVICT_MS` |
 | Sessions loaded at startup | 500 | `DEEPSEEK_MAX_SESSIONS` |
 
 ```bash
 # A deliberately long coding session: 24 hours, 500 messages.
-DEEPSEEK_SESSION_TTL_MS=86400000 DEEPSEEK_MAX_MESSAGE_DEPTH=500 npm start
+DEEPSEEK_SESSION_TTL_MS=86400000 DEEPSEEK_MAX_MESSAGE_DEPTH=500 \
+  DEEPSEEK_MAX_HISTORY_MESSAGES=500 npm start
 ```
+
+The two replay caps move with `DEEPSEEK_MAX_MESSAGE_DEPTH`, not independently. When a chat is replaced the proxy re-injects its local transcript; if the replay depth stayed at 100, a "500-message" session would still recover only the last 100 turns. Raise them together.
 
 `GET /health` reports the effective values under `session_reuse`, so you can confirm an override took effect without reading the source.
 
@@ -1113,6 +1119,8 @@ Full table: [docs/models.md](docs/models.md).
 | `DEEPSEEK_GUARD_BLOCKS` | on | Fallback for the prompt guard blocks. `off` disables them process-wide; prefer the per-request `guard_blocks` body field. See [Refactor mode](#3-refactor-mode--per-request-guard-block-opt-out) |
 | `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one DeepSeek chat is reused before the proxy opens a fresh one and replays local history. Default 2 hours. See [Session lifetime](#session-lifetime-and-its-limits) |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Messages per chat before a forced reset. Minimum 2 |
+| `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Local turns replayed into a replacement chat. Raise it with `DEEPSEEK_MAX_MESSAGE_DEPTH` or a deep session recovers only the last 100 turns. Minimum 2 |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Char budget for that replay. One huge paste cannot evict everything else: per-entry caps apply too. Minimum 1000 |
 | `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | How long an idle session survives on disk across restarts |
 | `DEEPSEEK_MAX_SESSIONS` | `500` | Session cap loaded from disk at startup |
 | `TRUST_PROXY` | off | If `1`, the client IP is taken from `X-Forwarded-For` |

@@ -88,14 +88,18 @@ Kalau shim `deepseek-local` sudah dipasang (lihat bawah), satu perintah saja:
 
 ```
 deepseek-local            nyalakan semua
-deepseek-local stop       matikan semua
-deepseek-local restart    matikan lalu nyalakan
+deepseek-local off        matikan semua (alias: stop)
+deepseek-local restart    matikan, tunggu port benar-benar bebas, lalu nyalakan
 deepseek-local status     sedang jalan? 9router versi mana yang dipakai?
 deepseek-local verify     buktikan rantai penuh sampai CHAIN_OK
 ```
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
-menjalankan proses kedua.
+menjalankan proses kedua. `restart` tidak sekadar tidur 3 detik — ia menunggu
+sampai port 9655 dan 20128 benar-benar tidak lagi `Listen`, karena socket yang
+masih di `TIME_WAIT` membuat `start.ps1` mengira stack sudah hidup dan melewati
+peluncuran. Kalau setelah 20 detik port masih dipegang proses lain, ia berhenti
+dengan pesan jelas daripada menyalakan setengah jalan.
 
 Tanpa shim, pakai file .bat langsung:
 
@@ -125,6 +129,48 @@ exit /b %ERRORLEVEL%
 
 Pastikan `%USERPROFILE%\.local\bin` ada di PATH. Kalau repo dipindah, cukup ubah
 `STACK_DIR` di satu file itu.
+
+### Menyetel batas sesi (`settings.local.ps1`)
+
+`start.ps1` me-*dot-source* `local-stack\settings.local.ps1` setiap kali jalan,
+jadi nilai di situ ikut ke proses proxy yang ia lahirkan dan bertahan setelah
+reboot — tidak perlu mengekspor env var manual tiap kali. File itu git-ignored
+karena isinya tuning mesin ini, bukan sesuatu untuk ikut ke repo. Contohnya
+disediakan sebagai `settings.local.example.ps1`:
+
+```powershell
+Copy-Item local-stack\settings.local.example.ps1 local-stack\settings.local.ps1
+```
+
+Kalau file itu rusak, `start.ps1` hanya memberi peringatan lalu lanjut dengan
+default — stack tidak ikut mati gara-gara satu baris salah.
+
+Setelan yang dipakai di mesin ini:
+
+| Variabel | Nilai | Arti |
+|---|---|---|
+| `DEEPSEEK_SESSION_TTL_MS` | `604800000` | Chat DeepSeek dipakai 7 hari sebelum diganti |
+| `DEEPSEEK_MAX_MESSAGE_DEPTH` | `400` | 400 pesan per chat sebelum reset paksa |
+| `DEEPSEEK_MAX_HISTORY_MESSAGES` | `400` | 400 giliran lokal diputar ulang ke chat pengganti |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `1200000` | Anggaran karakter untuk pemutaran ulang itu |
+
+Dua yang terakhir harus naik bersama `DEEPSEEK_MAX_MESSAGE_DEPTH`. Menaikkan
+depth saja tidak ada gunanya: saat chat diganti, proxy memutar ulang riwayat
+lokal, dan pemutaran itu dulu dipatok di 100 entri — sesi "400 pesan" tetap
+hanya memulihkan 100 giliran terakhir.
+
+Cek hasilnya benar-benar aktif, jangan percaya file saja:
+
+```
+deepseek-local status
+```
+
+```
+  proxy    UP    port 9655  |  1 account(s), 1 ready
+                 session: ttl 7.0 days, 400 msgs, replays 400 msgs / 1200k chars
+```
+
+Atau `curl http://127.0.0.1:9655/health` dan lihat `session_reuse`.
 
 Dashboard proxy: <http://127.0.0.1:9655/dashboard> · 9router: <http://127.0.0.1:20128>
 

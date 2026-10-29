@@ -19,24 +19,38 @@ to 9router. Runs on Windows on this machine.
 
 ## Commands
 
-- Start everything: `local-stack\Start-All.bat`
-- Stop everything: `local-stack\Stop-All.bat`
-- Full chain check: `local-stack\Verify-All.bat` — expect `CHAIN_OK`
-- Unit tests: `node --test tests/unit.test.js` — expect 105 pass
-- Full suite: `npm test` — 291 pass, 13 fail (pre-existing: need Chrome/macOS)
+- Start everything: `deepseek-local` (shim) or `local-stack\Start-All.bat`
+- Stop everything: `deepseek-local off` (alias `stop`) or `local-stack\Stop-All.bat`
+- Restart: `deepseek-local restart` - waits for ports 9655/20128 to stop listening
+  before starting, instead of a fixed sleep that raced TIME_WAIT sockets
+- Full chain check: `deepseek-local verify` or `local-stack\Verify-All.bat` - expect `CHAIN_OK`
+- Unit tests: `node --test tests/unit.test.js` - expect 106 pass
+- Full suite: `npm test` - 291 pass, 13 fail (pre-existing: need Chrome/macOS)
 
 ## Decisions
 
-- `2026-10-29` — Proxy is the repo root and `local-stack/` is a subfolder, so one
+- `2026-10-29` - Proxy is the repo root and `local-stack/` is a subfolder, so one
   clone gives the whole chain. Scripts resolve the proxy as `..` from
   `$PSScriptRoot`; override with `$env:FREEDEEPSEEK_DIR`.
-- `2026-10-29` — Guard blocks are disabled **per request** (`guard_blocks: false`
+- `2026-10-29` - Guard blocks are disabled **per request** (`guard_blocks: false`
   in the body, or the `x-deepseek-guard-blocks` header), never globally. A global
   switch would weaken every agent request to serve one refactor call.
-- `2026-10-29` — Session limits became env-driven (`DEEPSEEK_SESSION_TTL_MS` etc.)
+- `2026-10-29` - Session limits became env-driven (`DEEPSEEK_SESSION_TTL_MS` etc.)
   with the old values as defaults. Raising them extends a working session; it is
   not long-term memory.
-- `2026-10-29` — Long-term memory lives in the system prompt (`AGENTS.md` +
+- `2026-10-29` - `MAX_HISTORY_LENGTH` / `MAX_HISTORY_CHARS` also became env-driven
+  (`DEEPSEEK_MAX_HISTORY_MESSAGES` / `DEEPSEEK_MAX_HISTORY_CHARS`). They are the
+  real limit on recovery: raising `DEEPSEEK_MAX_MESSAGE_DEPTH` alone still replays
+  only the last 100 turns after a rollover, so the two must move together.
+- `2026-10-29` - Machine tuning lives in `local-stack\settings.local.ps1`
+  (git-ignored, example shipped). `start.ps1` dot-sources it so the values reach
+  the spawned proxy and survive reboots without re-exporting env vars. A broken
+  file warns and falls back to defaults instead of blocking startup.
+- `2026-10-29` - This machine runs 7-day TTL / 400 messages / 400-message replay
+  over 1.2M chars. Verified live: a token set before `deepseek-local restart` was
+  still recalled after it, and a 10s TTL test proved rollover replays local
+  history rather than dropping it.
+- `2026-10-29` - Long-term memory lives in the system prompt (`AGENTS.md` +
   `MEMORY.md`), not in the session store. Measured ceiling for a memo that must be
   recalled precisely: ~80,000 characters.
 
@@ -71,7 +85,14 @@ to 9router. Runs on Windows on this machine.
   defaults to 600000 for this reason.
 - Killing only the process on port 20128 makes 9router look like it fails to
   start: its `cli.js` supervisor respawns the child. `stop.ps1` kills the
-  supervisor first.
+  supervisor first. The pattern must cover **both** the global install
+  (`node_modules\9router\app`) and the local build
+  (`9router-source\cli\app\custom-server.js`); a global-only pattern leaves the
+  local build running and `off` reports success with the port still listening.
+- **`restart` must wait for the ports, not sleep.** A socket in `TIME_WAIT` still
+  answers a connect probe, so `start.ps1` decides the stack is already up, skips
+  launching, and `restart` silently leaves the old process in place. Poll
+  `Get-NetTCPConnection -State Listen` until empty (20s cap) before starting.
 - `git push` is rejected with `GH007` if the commit email is private on GitHub.
   This repo uses `193550268+fauznazz-afk@users.noreply.github.com`.
 

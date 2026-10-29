@@ -2020,11 +2020,16 @@ test('audit srv-tools-4: extractScreenshotPaths only reports paths from the curr
 test('session limits are configurable, with the old defaults preserved', () => {
   // The 2h / 100-message pair was a hardcoded guess. It is now env-driven, but
   // the defaults must not drift: existing deployments depend on them.
-  const { SESSION_TTL_MS, MAX_MESSAGE_DEPTH, SESSION_IDLE_EVICT_MS, MAX_SESSIONS_ON_DISK } = serverInternals;
+  const {
+    SESSION_TTL_MS, MAX_MESSAGE_DEPTH, SESSION_IDLE_EVICT_MS, MAX_SESSIONS_ON_DISK,
+    MAX_HISTORY_LENGTH, MAX_HISTORY_CHARS,
+  } = serverInternals;
   assert.equal(SESSION_TTL_MS, 2 * 60 * 60 * 1000, 'default TTL must stay 2 hours');
   assert.equal(MAX_MESSAGE_DEPTH, 100, 'default message depth must stay 100');
   assert.equal(SESSION_IDLE_EVICT_MS, SESSION_TTL_MS * 2, 'idle eviction must default to 2x the TTL');
   assert.equal(MAX_SESSIONS_ON_DISK, 500, 'default session cap must stay 500');
+  assert.equal(MAX_HISTORY_LENGTH, 100, 'default replay depth must stay 100 messages');
+  assert.equal(MAX_HISTORY_CHARS, 400000, 'default replay budget must stay 400k chars');
 });
 
 test('session TTL env override is read at startup and rejects nonsense', () => {
@@ -2047,4 +2052,27 @@ test('session TTL env override is read at startup and rejects nonsense', () => {
   });
   assert.notEqual(bad.status, 0, 'a non-numeric TTL must abort startup');
   assert.match(String(bad.stderr || ''), /non-negative number/, 'the error must name the bad variable');
+});
+
+test('replay caps are env-driven too, so a deeper session can actually recover', () => {
+  // Raising MAX_MESSAGE_DEPTH alone is useless: the rollover replays local
+  // history, and that replay was hardcoded to 100 entries / 400k chars. Both
+  // must move together or a "500 message" session still recovers only 100.
+  const { execFileSync } = require('child_process');
+  const script = `
+    const s = require(${JSON.stringify(path.join(__dirname, '..', 'server.js'))}).__test;
+    process.stdout.write(JSON.stringify({ m: s.MAX_HISTORY_LENGTH, c: s.MAX_HISTORY_CHARS }));
+  `;
+  const out = execFileSync(process.execPath, ['-e', script], {
+    env: {
+      ...process.env,
+      DEEPSEEK_MAX_HISTORY_MESSAGES: '400',
+      DEEPSEEK_MAX_HISTORY_CHARS: '1600000',
+    },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.m, 400, 'replay depth override must be honoured');
+  assert.equal(parsed.c, 1600000, 'replay char budget override must be honoured');
 });

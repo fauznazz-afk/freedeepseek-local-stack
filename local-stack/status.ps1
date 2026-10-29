@@ -65,8 +65,11 @@ if ($proxyUp) {
         $acct = @($h.accounts).Count
         $ready = @($h.accounts | Where-Object { $_.ready }).Count
         $ttl = $h.session_reuse.ttl_minutes
-        Write-Host ("  proxy    UP    port {0}  |  {1} account(s), {2} ready  |  session ttl {3}m" -f `
-            $ProxyPort, $acct, $ready, $ttl) -ForegroundColor Green
+        $ttlText = if ($ttl -ge 1440) { "{0:N1} days" -f ($ttl / 1440) } elseif ($ttl -ge 60) { "{0:N1} hours" -f ($ttl / 60) } else { "$ttl min" }
+        Write-Host ("  proxy    UP    port {0}  |  {1} account(s), {2} ready" -f $ProxyPort, $acct, $ready) -ForegroundColor Green
+        Write-Host ("                 session: ttl {0}, {1} msgs, replays {2} msgs / {3}k chars" -f `
+            $ttlText, $h.session_reuse.max_messages, $h.session_reuse.replay_messages,
+            [math]::Round($h.session_reuse.replay_chars / 1000)) -ForegroundColor DarkGray
     } catch {
         Write-Host ("  proxy    UP    port {0}  |  /health did not answer" -f $ProxyPort) -ForegroundColor Yellow
     }

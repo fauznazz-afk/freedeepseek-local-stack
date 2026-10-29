@@ -18,6 +18,8 @@ local-stack/logs/
 local-stack/run/
 # State snapshots taken before risky upgrades (SQLite DB copies, credentials).
 local-stack/.backup-9router-state-*/
+# Machine-specific tuning (session limits). Ships as settings.local.example.ps1.
+local-stack/settings.local.ps1
 # Editor/OS noise.
 *.bak
 *.bak-*
