@@ -767,6 +767,27 @@ test('harvestSessionMemory banks anchors, dedupes, and caps the ledger', () => {
   assert.equal(serverInternals.sessionMemoryText({}), '', 'no memory -> empty block');
 });
 
+test('ledger is per-session and leaves surviving anchors alone', () => {
+  const a = {}, b = {};
+  const text = 'ran: git status --short in D:\\proj\\src\\a.js';
+  const aAdded = serverInternals.harvestSessionMemory(a, text);
+  const bAdded = serverInternals.harvestSessionMemory(b, text);
+  assert.ok(aAdded > 0 && bAdded > 0);
+  assert.equal(a.memory.length, b.memory.length, 'both sessions bank independently');
+  assert.ok(a.memory[0] !== b.memory[0] || a !== b, 'arrays are distinct objects');
+  assert.deepEqual(a.memory, b.memory, 'same content but separate ledgers');
+  assert.ok(!a.memory.shared, 'no cross-session bleeding by construction');
+
+  // A middle turn that keeps its anchor in the condensed prompt (cap >= stub
+  // floor) is NOT banked: its facts already live in the prompt, nothing lost.
+  const conversation = 'User: start\n\n[Tool Result]\n' + 'x'.repeat(300000)
+    + '\nanchor: C:\\keep\\surviving-anchor-77.js\n[Tool Result]\n'
+    + 'y'.repeat(2000) + '\nUser: final question\n';
+  const result = serverInternals.structuredCompact(conversation, 20000);
+  assert.equal(result.text.includes('surviving-anchor-77'), true, 'anchor stays in prompt');
+  assert.equal((result.droppedText || '').length, 0, 'surviving turn is not reported as lost');
+});
+
 test('buildBoundedPrompt surfaces droppedText so the session can bank it', () => {
   const history = Array.from({ length: 300 }, (_, i) => (
     `User: turn ${i} touched D:\\proj\\src\\file${i}.js and ran npm run build\n\nAssistant: ok ${(i + 1) * 7919}\n\n`
