@@ -130,6 +130,14 @@ to 9router. Runs on Windows on this machine.
   prefix on the next reset/rebuild. Sticky continuations skip it (the live
   remote chat still holds those turns). First production bank: 162 anchors on
   unkeyed-00b5c6e89a38 from a 2M-char conversation.
+- Shared project ledger (2026-10-30, commit 588fddc): with
+  DEEPSEEK_SHARED_MEMORY_CHARS > 0 (set to 16000 in settings.local.ps1), every
+  harvested anchor also banks into data/shared-memory.json (persisted by
+  saveSessions, loaded at startup). A brand-NEW agent key inherits it via the
+  recovery prefix. Verified live: fresh key with no history answered both
+  seeded shared lines exactly. Render skips lines already in the shared block,
+  so nothing doubles. Isolation claim locked by tests: ledger is per-session,
+  and anchors that survive in the prompt are never banked.
 - Refreshing 9router's model list: the RUNNING build is bundled in
   `9router-source/cli/app/.next-cli-build/server/*.js` — editing
   `open-sse/providers/registry/*.js` alone has no effect until the bundle is
