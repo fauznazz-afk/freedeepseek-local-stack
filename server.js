@@ -198,6 +198,7 @@ function serializeSessions() {
             accountId: session.accountId || null,
             history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
             sentSystemFingerprint: session.sentSystemFingerprint || null,
+            conversationKey: session.conversationKey || null,
             lastActivityAt: session.lastActivityAt || Date.now(),
         };
     }
@@ -256,6 +257,7 @@ function loadSessions() {
                 accountId: session.accountId || null,
                 history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
                 sentSystemFingerprint: session.sentSystemFingerprint || null,
+                conversationKey: session.conversationKey || null,
                 lastActivityAt: session.lastActivityAt || now,
             });
             loaded++;
@@ -916,6 +918,7 @@ function createSession() {
         accountId: null,
         history: [],
         sentSystemFingerprint: null,
+        conversationKey: null,
         lastActivityAt: Date.now(),
     };
 }
@@ -3169,6 +3172,19 @@ function hasExplicitConversationHistory(messages) {
     return turns.length > 1 || turns.some(msg => msg.role === 'assistant' || msg.role === 'tool');
 }
 
+// OpenCode does not send a per-chat session id: each request carries the full
+// transcript instead. Fingerprint the conversation's root user turns so the
+// proxy can tell an unrelated chat from a continuation of the sticky remote
+// session. First two user turns (capped) — a shared opener like "lanjut" alone
+// would collide across chats.
+function conversationFingerprint(messages) {
+    const userTurns = (messages || []).filter(msg => msg && msg.role === 'user')
+        .map(msg => normalizeMessageContent(msg.content).trim()).filter(Boolean);
+    if (userTurns.length === 0) return null;
+    const root = userTurns.slice(0, 2).map((text, i) => text.slice(0, i === 0 ? 4000 : 500)).join('\u0000');
+    return fingerprintPrompt(root);
+}
+
 function buildRecoveryHistoryPrefix(history) {
     if (!Array.isArray(history) || history.length === 0) return '';
     // Tell the model what this block is. Presented as plain transcript, a
@@ -4808,6 +4824,18 @@ const server = http.createServer(async (req, res) => {
             const session = getOrCreateAgentSession(agentId);
             activeSession = session;
 
+            // A changed conversation fingerprint means the client switched to a
+            // different chat (e.g. resumed old history in OpenCode). The sticky
+            // remote chat and the local recovery history belong to the previous
+            // chat, so both are dropped; the client's own transcript rebuilds context.
+            const convoKey = conversationFingerprint(messages);
+            if (convoKey && session.conversationKey && session.conversationKey !== convoKey) {
+                const dropped = resetRemoteSession(session);
+                session.history = [];
+                console.log(`${agentTag} Client switched conversation; reset remote chat ${dropped.failedSessionId || '(none)'} and ${dropped.failedMessageCount || 0} message(s) of history.`);
+            }
+            if (convoKey) session.conversationKey = convoKey;
+
             // Roll over TTL/depth-limited sessions before deciding whether to
             // inject local recovery history into the newly built prompt.
             const promptRollover = prepareSessionForPrompt(session);
@@ -5820,6 +5848,7 @@ module.exports = {
         boundHistoryText: contextLib.boundHistoryText,
         extractAnchors: contextLib.extractAnchors,
         hasExplicitConversationHistory,
+        conversationFingerprint,
         buildRecoveryHistoryPrefix,
         SESSION_TTL_MS,
         SESSION_IDLE_EVICT_MS,

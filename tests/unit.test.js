@@ -924,6 +924,36 @@ test('client-provided multi-turn history suppresses server recovery-history inje
   ]), true);
 });
 
+test('conversation fingerprint is stable within a chat and changes across chats', () => {
+  const chatA = [
+    { role: 'system', content: 'You are opencode' },
+    { role: 'user', content: 'perbaiki bug login di server.js' },
+    { role: 'user', content: 'lanjut' },
+  ];
+  // Same chat, more turns later: root turns unchanged -> same fingerprint.
+  assert.equal(
+    serverInternals.conversationFingerprint(chatA),
+    serverInternals.conversationFingerprint([...chatA, { role: 'user', content: 'test again' }]),
+  );
+  // Different chat, same opener: second turn differs -> different fingerprint.
+  const chatB = [
+    { role: 'system', content: 'You are opencode' },
+    { role: 'user', content: 'perbaiki bug login di server.js' },
+    { role: 'user', content: 'sekarang ganti ke skema warna' },
+  ];
+  assert.notEqual(serverInternals.conversationFingerprint(chatA), serverInternals.conversationFingerprint(chatB));
+  // No user turn -> no fingerprint (nothing to key on).
+  assert.equal(serverInternals.conversationFingerprint([{ role: 'system', content: 'rules' }]), null);
+  // Compaction rewrote the root turn -> fingerprint changes (accepted cost: fresh chat with full transcript).
+  assert.notEqual(
+    serverInternals.conversationFingerprint(chatA),
+    serverInternals.conversationFingerprint([
+      { role: 'user', content: '[compacted summary of earlier turns]' },
+      { role: 'user', content: 'lanjut' },
+    ]),
+  );
+});
+
 test('OpenCode session-title requests are answered locally without DeepSeek', () => {
   const messages = [
     { role: 'user', content: 'Generate a title for this conversation:\n' },
