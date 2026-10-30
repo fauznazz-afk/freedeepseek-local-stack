@@ -38,3 +38,6 @@ Thumbs.db
 
 # Scratch files used while testing (never commit).
 local-stack/.tmp-*
+
+# Knowledge graph output (graphify).
+graphify-out/

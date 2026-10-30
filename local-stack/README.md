@@ -7,11 +7,24 @@ Folder ini adalah bagian dari repo proxy: proxy ada di root repo (satu tingkat d
 atas), launcher ada di sini. Skrip men resolve proxy ke `..` dari lokasinya sendiri,
 jadi repo bisa dipindah/di-clone di mana saja. Override lewat `$env:FREEDEEPSEEK_DIR`.
 
+## Pasang dari nol
+
+Dari root repo:
+
+```powershell
+npm run setup     # cek Node, buat settings.local.ps1, pasang shim deepseek-local
+npm run auth      # login DeepSeek di jendela Chrome yang terbuka
+deepseek-local start
+```
+
+`npm run setup` idempoten: file yang sudah ada tidak ditimpa. 9router hanya
+peringatan kalau tidak ada — proxy tetap jalan tanpa 9router.
+
 ## Prasyarat
 
 - Windows + PowerShell 5.1 (atau `pwsh` 7)
 - Node.js 18+
-- `9router` terpasang global: `npm i -g 9router`
+- `9router` terpasang global: `npm i -g 9router` (opsional, untuk rantai penuh)
 - Sudah login DeepSeek di mesin ini (`npm run auth` dari root repo)
 
 ## Di mana 9router sebenarnya jalan
@@ -113,22 +126,19 @@ Tanpa shim, pakai file .bat langsung:
 ### Memasang perintah `deepseek-local`
 
 Logika sebenarnya ada di `local-stack\deepseek-local.ps1`; shim di PATH hanya
-meneruskan argumen. Buat `%USERPROFILE%\.local\bin\deepseek-local.cmd`:
+meneruskan argumen. Dari root repo:
 
-```bat
-@echo off
-setlocal
-set "STACK_DIR=D:\FreeDeepseekAPI\local-stack"
-if not exist "%STACK_DIR%\deepseek-local.ps1" (
-    echo deepseek-local: cannot find "%STACK_DIR%\deepseek-local.ps1"
-    exit /b 1
-)
-powershell -NoProfile -ExecutionPolicy Bypass -File "%STACK_DIR%\deepseek-local.ps1" %*
-exit /b %ERRORLEVEL%
+```powershell
+npm run shim
 ```
 
-Pastikan `%USERPROFILE%\.local\bin` ada di PATH. Kalau repo dipindah, cukup ubah
-`STACK_DIR` di satu file itu.
+Itu menulis `%USERPROFILE%\.local\bin\deepseek-local.cmd` dengan path repo ini dan
+menambahkan folder tersebut ke PATH user (buka terminal baru). Kalau repo dipindah,
+jalankan lagi. Hapus dengan:
+
+```powershell
+powershell -File scripts\install-shim.ps1 -Uninstall
+```
 
 ### Menyetel batas sesi (`settings.local.ps1`)
 
@@ -306,11 +316,15 @@ di browser asalnya. Untuk akun jangka panjang, pakai helper di atas.
 
 | File | Fungsi |
 |------|--------|
-| `start.ps1` | Start proxy + 9router hidden, tunggu sampai HTTP benar-benar siap |
+| `start.ps1` | Start proxy + 9router hidden, **patch 9router otomatis**, tunggu sampai HTTP benar-benar siap |
 | `stop.ps1` | Stop berbasis PID file + pola command line (tidak menyentuh node lain) |
 | `verify.ps1` | Uji `/health`, `/v1/models`, dan satu completion nyata lewat 9router |
+| `status.ps1` | Satu pandangan: proxy up? 9router build mana yang melayani? akun siap? |
+| `deepseek-local.ps1` | Dispatcher satu perintah (`start`/`off`/`restart`/`status`/`verify`) |
+| `add-account.ps1` | Tambah/perbarui satu login DeepSeek lewat profil Chrome tersimpan |
 | `patch-deepseek.ps1` | Idempoten: arahkan build 9router dari `api.deepseek.com` ke proxy |
 | `clear-stale-errors.ps1` | Hapus error 401 lama + model lock di SQLite 9router |
+| `settings.local.example.ps1` | Contoh tuning sesi; disalin ke `settings.local.ps1` oleh `npm run setup` |
 | `logs/`, `run/` | Log dan PID file |
 
 ## Dokumentasi tambahan
@@ -322,14 +336,17 @@ di browser asalnya. Untuk akun jangka panjang, pakai helper di atas.
 
 ## Setelah update 9router
 
-`npm i -g 9router@latest` menimpa `.next-cli-build` dan mengembalikan URL DeepSeek
-ke `api.deepseek.com`. Jalankan:
+**Tidak ada langkah manual lagi.** `start.ps1` menjalankan `patch-deepseek.ps1`
+setiap kali start, jadi `npm i -g 9router@latest` atau rebuild `cli:pack` langsung
+ter-patch sebelum 9router dipakai.
 
 ```powershell
-powershell -File local-stack\stop.ps1
-powershell -File local-stack\patch-deepseek.ps1
-powershell -File local-stack\start.ps1
+deepseek-local restart
+deepseek-local verify      # harus berakhir CHAIN_OK
 ```
+
+Skip patch untuk satu kali jalan: `powershell -File local-stack\start.ps1 -Patch:$false`.
+Kalau 9router tidak terpasang, patch hanya memberi warning dan proxy tetap start.
 
 Patcher membuat backup di `%APPDATA%\9router\patch-backup\<timestamp>\`.
 

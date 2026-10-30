@@ -9,7 +9,9 @@
 param(
     [int]$ProxyPort = 9655,
     [int]$RouterPort = 20128,
-    [switch]$Patch
+    # Patch every launch: a 9router upgrade or rebuild regenerates the JS chunks
+    # with api.deepseek.com, so a one-time patch silently reverts. Pass -Patch:$false to skip.
+    [bool]$Patch = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,7 +84,14 @@ function Wait-Http([string]$Url, [int]$Seconds) {
     return $false
 }
 
-if ($Patch) { & (Join-Path $PSScriptRoot 'patch-deepseek.ps1') | Out-Host }
+if ($Patch) {
+    # A missing 9router (proxy-only install) must not abort the launch.
+    try {
+        & (Join-Path $PSScriptRoot 'patch-deepseek.ps1') | Out-Host
+    } catch {
+        Write-Host "[warn  ] 9router patch skipped: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
 
 # --- FreeDeepseekAPI -------------------------------------------------------
 $proxyPidFile = Join-Path $runDir 'proxy.pid'

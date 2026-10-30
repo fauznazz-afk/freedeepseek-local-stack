@@ -48,6 +48,7 @@ One model is on the site today: **DeepSeek-V4.1-Flash**. The native Web Search b
 
 ## Contents
 
+- [Three ways to install](#three-ways-to-install)
 - [Repository layout](#repository-layout)
 - [Local changes in this repo](#local-changes-in-this-repo)
 - [What you get](#what-you-get)
@@ -94,12 +95,17 @@ This repo is one self-contained folder with two parts:
 <repo root>/
 ├── server.js            # the proxy itself (port 9655)
 ├── lib/                 # proxy modules (pow, updater, context compaction)
-├── public/, docs/, tests/, scripts/, integrations/
+├── public/, docs/, tests/, integrations/
+├── scripts/
+│   ├── start.js         # launcher: npm start / npx free-deepseek-api
+│   ├── setup.ps1        # one-shot Windows setup (Node check, settings, shim)
+│   └── install-shim.ps1 # writes the deepseek-local command
 ├── local-stack/         # the local launcher that wires everything together
 │   ├── Start-All.bat    # start proxy + 9router, then verify
 │   ├── Stop-All.bat     # stop both
 │   ├── Verify-All.bat   # end-to-end chain check
-│   ├── start.ps1 / stop.ps1 / verify.ps1
+│   ├── start.ps1 / stop.ps1 / verify.ps1 / status.ps1
+│   ├── deepseek-local.ps1, add-account.ps1
 │   ├── patch-deepseek.ps1, clear-stale-errors.ps1
 │   └── README.md, CONTEXT-MEMORY.md, REFACTOR-MODE.md
 └── 9router-source/      # optional: 9router source checkout (git-ignored)
@@ -304,18 +310,46 @@ Details and log evidence: [local-stack/REFACTOR-MODE.md](local-stack/REFACTOR-MO
 
 `DEEPSEEK_ACCOUNT_COOLDOWN_MS` stays at `600000` (10 minutes), which matches upstream. It is worth knowing why: DeepSeek's own throttle message means "too many messages", and a short cooldown just re-hits the same login while it is still throttled, turning a soft limit into a hard one.
 
-### 5. Repository hygiene
+### 5. Automatic 9router patch (this build)
+
+The 9router patch used to be a manual step after every `npm i -g 9router@latest` or `npm run cli:pack`. A rebuild regenerates the JS chunks with `api.deepseek.com` and silently reverts the patch, so the chain broke exactly when nobody was looking.
+
+`local-stack/start.ps1` now patches on **every launch**:
+
+- `-Patch` changed from `[switch]` to `[bool]$Patch = $true`.
+- The patch runs inside `try/catch`, so a machine without 9router still starts the proxy (warning only, no abort).
+- `patch-deepseek.ps1` is idempotent: it scans every `*.js` under `.next-cli-build\server` recursively, so a 9router release that renames chunks is still covered.
+
+Skip it for one run with `-Patch:$false`.
+
+Verified 2026-10-30 on a rebuilt 9router 0.5.332: 5 chunks patched, `deepseek-local verify` -> `CHAIN_OK`.
+
+### 6. Installable by anyone
+
+The proxy was always runnable; the local layer was not shippable. It referenced `D:\FreeDeepseekAPI` and assumed a 9router build. Now:
+
+| Change | What it fixes |
+|---|---|
+| `package.json` `bin` -> `scripts/start.js` | `npx free-deepseek-api` runs the launcher (menu, restart-on-update) instead of `server.js` bare, which crashes without a TTY |
+| `package.json` `files` | Tarball is 3.7 MB / 114 files, down from 4.6 MB / 128. Excludes `tests/`, `.github/`, `MEMORY.md`, 9router state backups, and `settings.local.ps1` |
+| `scripts/install-shim.ps1` | Writes `%USERPROFILE%\.local\bin\deepseek-local.cmd` with the current repo path and adds it to the user PATH. `-Uninstall` removes it. No hardcoded drive letter |
+| `scripts/setup.ps1` | One-shot, idempotent: checks Node >=18, creates `settings.local.ps1` from the example, installs the shim, reports whether 9router exists (warning, not failure) |
+| `repository`, `homepage`, `bugs` | Point at this fork, not `dekrezz/FreeDeepseekAPI` |
+
+`local-stack/README.md` no longer prints a `D:\FreeDeepseekAPI` shim; it says `npm run shim`.
+
+### 7. Repository hygiene
 
 `.gitignore` now also excludes `data/`, `local-stack/logs/`, `local-stack/run/`, `*.bak`, `*.bak-*`, `*.log`, and `Thumbs.db`. Duplicate `.bat` wrappers at the repo root were removed in favour of `local-stack/`, and a stray `server.js.bak-*` backup was deleted.
 
 ### Test status
 
 ```bash
-node --test tests/unit.test.js     # 103 pass
+node --test tests/unit.test.js     # 122 pass, 0 fail
 npm test                           # 291 pass, 13 fail
 ```
 
-The 13 failures are pre-existing and identical to the upstream baseline — they need Chrome, macOS, or tooling not present here. They are not caused by these changes.
+The 13 `npm test` failures are pre-existing and identical to the upstream baseline — they need Chrome, macOS, or tooling not present here. They are not caused by these changes.
 
 ---
 
@@ -345,6 +379,63 @@ The 13 failures are pre-existing and identical to the upstream baseline — they
 - **Session recovery:** an empty reply, a broken tool call, or a timeout keeps the same chat
 - **Zero dependencies:** Node.js 18+, no npm packages
 - **License:** Apache-2.0
+
+---
+
+## Three ways to install
+
+Pick the one that matches what you need. Only the first needs nothing but Node.
+
+### A. Proxy only (simplest)
+
+No 9router, no patching. You get one OpenAI-compatible endpoint at
+`http://127.0.0.1:9655/v1` and the dashboard.
+
+```bash
+git clone https://github.com/fauznazz-afk/freedeepseek-local-stack.git
+cd freedeepseek-local-stack
+npm run setup      # checks Node, creates settings, installs the shim
+npm run auth       # sign in to DeepSeek in the Chrome window it opens
+npm start
+```
+
+On Linux or macOS run `npm run auth` and `npm start` directly; `npm run setup`
+is the Windows convenience wrapper.
+
+### B. Full local stack (proxy + 9router)
+
+Adds 9router on port `20128` so many clients can share one router. Needs 9router
+installed separately, because it is a different project with its own release
+cadence.
+
+```bash
+npm i -g 9router
+npm run setup
+npm run auth
+deepseek-local start     # patches 9router at every launch, then starts both
+deepseek-local verify    # expect CHAIN_OK
+```
+
+`deepseek-local` is installed by `npm run setup`. Without the shim use
+`local-stack\Start-All.bat`. The patch to 9router is re-applied on every start,
+so `npm i -g 9router@latest` does not break the chain.
+
+### C. Container
+
+```bash
+podman build -f Containerfile -t freedeepseek .
+```
+
+See [Rootless Podman](#rootless-podman) for the secrets and volume setup.
+
+### What `npm run setup` does
+
+1. Checks Node.js is 18 or newer.
+2. Copies `local-stack/settings.local.example.ps1` to `settings.local.ps1` if missing.
+3. Writes `%USERPROFILE%\.local\bin\deepseek-local.cmd` and adds that folder to your PATH.
+4. Reports whether a 9router build was found. Missing 9router is a warning, not a failure.
+
+Re-running it is safe: existing files are left alone.
 
 ---
 
