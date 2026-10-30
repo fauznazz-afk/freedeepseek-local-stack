@@ -2173,6 +2173,21 @@ test('a cooldown survives a restart, so restart cannot fake a fix', () => {
     assert.equal(account.cooldownReason, 'auth_expired');
     assert.ok(account.cooldownUntil >= before + 30 * 60 * 1000, 'quarantine lasts ~30 minutes');
   });
+
+  test('an auth rejection is failover-eligible: the request hops to another login', () => {
+    const account = { id: 'hop_acct', config: { token: 'dead', cookie: 'dead' }, cooldownUntil: 0 };
+    const error = serverInternals.accountAuthError(account, 'Authorization Failed (invalid token)', 'completion');
+    assert.equal(error.status, 401);
+    assert.equal(serverInternals.isAccountFailoverError(error), true, 'a dead credential fails over in the same request');
+    assert.equal(serverInternals.isAccountRateLimitError(error), false, 'auth failure stays distinct from rate-limit bookkeeping');
+    assert.equal(error.accountId, 'hop_acct');
+    // A true rate-limit error keeps its own path.
+    const rateError = serverInternals.accountRateLimitError(account, 'too frequent', null, 'test');
+    assert.equal(serverInternals.isAccountFailoverError(rateError), true);
+    // An arbitrary error (network, parse) is never failover-eligible.
+    assert.equal(serverInternals.isAccountFailoverError(new Error('boom')), false);
+    assert.equal(serverInternals.isAccountFailoverError(null), false);
+  });
 }
 
 test('a re-login does not inherit the previous login\'s cooldown', () => {

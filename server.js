@@ -913,6 +913,11 @@ function accountRateLimitError(account, detail, retryAfterRaw, label, status = 4
 function isAccountRateLimitError(error) {
     return error?.accountRateLimited === true;
 }
+// Both account-level failure types the request itself can survive by hopping to
+// another ready login: throttled (quota window) and auth-rejected (dead token).
+function isAccountFailoverError(error) {
+    return isAccountRateLimitError(error) || error?.accountAuthFailed === true;
+}
 // DeepSeek answers an expired or revoked login with business codes 40001-40003,
 // often on HTTP 200. Cool the login down and return a typed 401.
 function isDeepSeekAuthCode(payload) {
@@ -921,7 +926,12 @@ function isDeepSeekAuthCode(payload) {
 }
 function accountAuthError(account, detail, label) {
     markAccountFailure(account, 401, label, null, detail);
-    return createUpstreamHttpError(401, `${label}: ${detail}`);
+    const error = createUpstreamHttpError(401, `${label}: ${detail}`);
+    error.accountId = account?.id || null;
+    // Failover-eligible: a dead credential says nothing usable will come from this
+    // login, so the request itself hops to another ready login instead of dying.
+    error.accountAuthFailed = true;
+    return error;
 }
 function deepSeekJsonMessage(json) {
     if (!json || typeof json !== 'object') return '';
@@ -3377,10 +3387,11 @@ function remoteSessionShouldStay(session, { overflow = false, modelError = null 
     return true;
 }
 
-// A rate limit that hits a continuation or repair call: the account (or the whole
-// pool) is throttled, but the content already received is still a valid answer.
+// A rate limit or auth rejection that hits a continuation or repair call: the
+// account (or the whole pool) is throttled or dead, but the content already
+// received is still a valid answer.
 function isRateLimitedPoolOrAccount(error) {
-    return isAccountRateLimitError(error) || (error?.status === 429 && error?.type === 'rate_limit');
+    return isAccountFailoverError(error) || (error?.status === 429 && error?.type === 'rate_limit');
 }
 
 function isInstantEmptyResponse({ content, reasoningContent, messageId, elapsedMs }) {
@@ -5052,19 +5063,19 @@ const server = http.createServer(async (req, res) => {
                         failedAccountId = call.account.id;
                         lastError = result.rateLimitError;
                     } catch (e) {
-                        if (!isAccountRateLimitError(e)) throw e;
+                        if (!isAccountFailoverError(e)) throw e;
                         failedAccountId = e.accountId;
                         lastError = e;
                     }
                     if (clientGone || deadlineHit()) throw lastError;
-                    // Uploaded file ids and the chat lock belong to the throttled login.
+                    // Uploaded file ids and the chat lock belong to the failed login.
                     releaseAccountChatLock(lockHolder);
                     imageContext.refFileIds.length = 0;
-                    console.log(`${agentTag} account ${failedAccountId} rate-limited; failing over (hop ${hop + 1}).`);
+                    console.log(`${agentTag} account ${failedAccountId} ${isAccountRateLimitError(lastError) ? 'rate-limited' : 'rejected this credential'}; failing over (hop ${hop + 1}).`);
                 }
                 // Pool-wide cooldown: preserve context and retry up to 3 times
                 // with short 1s delays instead of waiting for the full cooldown.
-                if (isAccountRateLimitError(lastError) && accounts.length > 0 && !clientGone && !deadlineHit()) {
+                if (isAccountFailoverError(lastError) && accounts.length > 0 && !clientGone && !deadlineHit()) {
                     const maxQuickRetries = 3;
                     for (let retry = 1; retry <= maxQuickRetries; retry++) {
                         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -5082,7 +5093,7 @@ const server = http.createServer(async (req, res) => {
                             }
                             lastError = result.rateLimitError;
                         } catch (e) {
-                            if (!isAccountRateLimitError(e)) throw e;
+                            if (!isAccountFailoverError(e)) throw e;
                             lastError = e;
                         }
                     }
@@ -5440,7 +5451,7 @@ const server = http.createServer(async (req, res) => {
                         repairRateLimitError = e;
                         console.log(`${agentTag} strict repair has no ready login: ${e.message}`);
                         // A pool-wide 429 means every login is cooling down: no hop can succeed.
-                        if (!isAccountRateLimitError(e)) break;
+                        if (!isAccountFailoverError(e)) break;
                     }
                     // Uploaded file ids and the chat lock belong to the throttled login.
                     releaseAccountChatLock(lockHolder);
@@ -5847,6 +5858,8 @@ module.exports = {
         recordAccountSuccess,
         accountRateLimitError,
         isAccountRateLimitError,
+        isAccountFailoverError,
+        accountAuthError,
         readAccountFiles,
         buildAccountsList,
         adminAccessDecision,
