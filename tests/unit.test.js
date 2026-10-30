@@ -788,6 +788,39 @@ test('ledger is per-session and leaves surviving anchors alone', () => {
   assert.equal((result.droppedText || '').length, 0, 'surviving turn is not reported as lost');
 });
 
+test('shared project ledger banks across sessions and renders with dedupe', () => {
+  const hooks = serverInternals.sharedLedgerHooks;
+  hooks.disable();
+  // Off by default: requested via test hook below, env switches it in prod.
+  serverInternals.harvestSessionMemory({ memory: [] }, 'read D:\\shared\\ledger-check.js');
+  assert.equal(hooks.state.enabled, false, 'disabled until opted in');
+
+  hooks.configure(6000);
+  try {
+    const a = {}, b = {};
+    serverInternals.harvestSessionMemory(a, 'ran: git diff --stat in D:\\shared\\repo-a.js');
+    serverInternals.harvestSessionMemory(b, 'ERROR: missing module D:\\shared\\repo-b.js');
+    assert.ok(hooks.state.enabled && hooks.state.lines.length >= 2, 'both sessions banked into shared');
+    const prefix = serverInternals.recoveryMemoryPrefix({ memory: [] });
+    assert.match(prefix, /Shared project memory/);
+    assert.match(prefix, /repo-a\.js/);
+    assert.match(prefix, /repo-b\.js/);
+    // A session whose own ledger holds a line already in shared must not repeat it.
+    const uniqueLine = 'D:\\shared\\only-in-session-9k4.js';
+    hooks.state.bank(uniqueLine);
+    const both = { memory: [uniqueLine, 'D:\\shared\\session-only-check.js'] };
+    const mixed = serverInternals.recoveryMemoryPrefix(both);
+    assert.equal((mixed.match(/only-in-session-9k4\.js/g) || []).length, 1, 'line already in shared is not duplicated');
+    assert.equal((mixed.match(/session-only-check\.js/g) || []).length, 1, 'session-only line still rendered');
+    // Flood: shared ledger keeps inside its own cap.
+    serverInternals.harvestSessionMemory({}, Array.from({ length: 400 }, (_, i) => `C:\\shared\\wide\\path\\entry\\${i}\\component\\file\\name${i}.js`).join('\n'));
+    assert.ok(hooks.state.lines.length * 40 <= 6000 + 40, 'shared ledger respects its char cap');
+  } finally {
+    hooks.disable();
+  }
+  assert.equal(serverInternals.recoveryMemoryPrefix({ memory: [] }).includes('Shared project memory'), false, 'disabled again -> no shared block');
+});
+
 test('buildBoundedPrompt surfaces droppedText so the session can bank it', () => {
   const history = Array.from({ length: 300 }, (_, i) => (
     `User: turn ${i} touched D:\\proj\\src\\file${i}.js and ran npm run build\n\nAssistant: ok ${(i + 1) * 7919}\n\n`

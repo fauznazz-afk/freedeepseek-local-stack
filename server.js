@@ -217,6 +217,7 @@ function saveSessions() {
                 const json = JSON.stringify(data, null, 2);
                 fs.writeFileSync(SESSIONS_FILE_PATH, json, 'utf8');
                 console.log(`[DS-API] Saved ${Object.keys(data).length} session(s) to disk`);
+                serializeSharedLedger();
             } catch (e) {
                 console.error(`[DS-API] Failed to save sessions: ${e.message}`);
             } finally {
@@ -3264,6 +3265,7 @@ function harvestSessionMemory(session, droppedText) {
         const line = String(anchor || '').trim().slice(0, 250);
         if (line.length < 4 || session.memory.includes(line)) continue;
         session.memory.push(line);
+        if (sharedLedger.enabled) sharedLedger.bank(line);
         added++;
     }
     if (added > 0) {
@@ -3275,9 +3277,79 @@ function harvestSessionMemory(session, droppedText) {
     }
     return added;
 }
-function sessionMemoryText(session) {
+function sessionMemoryText(session, skipLines) {
     if (!Array.isArray(session.memory) || session.memory.length === 0) return '';
-    return `${SESSION_MEMORY_HEADER}\n${session.memory.join('\n')}\n\n`;
+    const lines = skipLines instanceof Set
+        ? session.memory.filter(line => !skipLines.has(line))
+        : session.memory;
+    if (lines.length === 0) return '';
+    return `${SESSION_MEMORY_HEADER}\n${lines.join('\n')}\n\n`;
+}
+
+// Shared project ledger: every session's anchors banked into one file, so a
+// client that changes its agent key (UA/remote shift -> new unkeyed id) or
+// starts a fresh session still inherits the already-harvested facts. Opt-in
+// via DEEPSEEK_SHARED_MEMORY_CHARS (0 = off). State lives in memory and is
+// persisted by the same debounced save that writes sessions.json.
+const sharedLedger = {
+    enabled: false,
+    lines: [],
+    dirty: false,
+    MAX_CHARS: 0,
+    bank(line) {
+        if (this.lines.includes(line)) return;
+        this.lines.push(line);
+        this.dirty = true;
+        let size = this.lines.reduce((n, l) => n + l.length + 1, 0);
+        while (size > this.MAX_CHARS && this.lines.length > 1) {
+            size -= this.lines.shift().length + 1;
+        }
+        if (this.lines.length > 800) this.lines = this.lines.slice(-800);
+    },
+};
+function sharedMemoryText() {
+    if (!sharedLedger.enabled || sharedLedger.lines.length === 0) return '';
+    return '[Shared project memory: facts harvested from other sessions of this proxy. Re-check any path or command in this file before relying on it.]\n'
+        + `${sharedLedger.lines.join('\n')}\n\n`;
+}
+// Recovery prefix = shared ledger first (project-level, most durable), then
+// session ledger minus lines the shared text already carries.
+function recoveryMemoryPrefix(session) {
+    const shared = sharedMemoryText();
+    const skip = shared ? new Set(sharedLedger.lines) : null;
+    const blocks = [shared, sessionMemoryText(session, skip)];
+    return blocks.filter(Boolean).join('');
+}
+function sharedLedgerFilePath() {
+    return path.join(__dirname, 'data', 'shared-memory.json');
+}
+function loadSharedLedger() {
+    sharedLedger.MAX_CHARS = Math.max(0, Math.floor(envNumber('DEEPSEEK_SHARED_MEMORY_CHARS', 0)));
+    sharedLedger.enabled = sharedLedger.MAX_CHARS > 0;
+    sharedLedger.lines = [];
+    if (!sharedLedger.enabled) return;
+    try {
+        const raw = fs.readFileSync(sharedLedgerFilePath(), 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.lines)) {
+            sharedLedger.lines = parsed.lines.filter(l => typeof l === 'string' && l.trim().length >= 4).slice(-4000);
+        }
+        console.log(`[DS-API] Shared memory ledger loaded: ${sharedLedger.lines.length} line(s) (cap ${sharedLedger.MAX_CHARS} chars)`);
+    } catch (e) {
+        if (e.code !== 'ENOENT') console.error(`[DS-API] Shared memory ledger unreadable: ${e.message}`);
+    }
+}
+function serializeSharedLedger() {
+    if (!sharedLedger.enabled || !sharedLedger.dirty) return;
+    try {
+        const file = sharedLedgerFilePath();
+        if (!fs.existsSync(path.dirname(file))) fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ savedAt: Date.now(), lines: sharedLedger.lines }, null, 2), 'utf8');
+        sharedLedger.dirty = false;
+        console.log(`[DS-API] Saved shared memory ledger (${sharedLedger.lines.length} line(s)) to disk`);
+    } catch (e) {
+        console.error(`[DS-API] Failed to save shared memory ledger: ${e.message}`);
+    }
 }
 
 function buildRecoveryHistoryPrefix(history) {
@@ -4960,7 +5032,7 @@ const server = http.createServer(async (req, res) => {
             // already holds those turns).
             const recoveryHistoryPrefix = hasExplicitConversationHistory(messages)
                 ? ''
-                : sessionMemoryText(session) + buildRecoveryHistoryPrefix(session.history);
+                : recoveryMemoryPrefix(session) + buildRecoveryHistoryPrefix(session.history);
             const resolved = resolveUpstreamPrompt(session, messages, tools, recoveryHistoryPrefix, promptOptions);
             const historyPrefix = resolved.historyPrefix;
 
@@ -5878,6 +5950,7 @@ async function main() {
     // Persist sessions to disk and reload on startup.
     setInterval(saveSessions, 5 * 60 * 1000).unref();
     loadSessions();
+    loadSharedLedger();
     server.listen(PORT, HOST, () => {
         console.log(`[DS-API] Server on http://${HOST}:${PORT} (multi-agent sessions enabled)`);
         console.log('[DS-API] POST /v1/chat/completions (OpenAI Chat Completions, stream=true|false)');
@@ -5994,8 +6067,16 @@ module.exports = {
         buildRetryPrompt,
         harvestSessionMemory,
         sessionMemoryText,
+        recoveryMemoryPrefix,
         MAX_SESSION_MEMORY_CHARS,
         SESSION_MEMORY_HEADER,
+        sharedLedgerHooks: {
+            configure(envChars = 16000) { sharedLedger.MAX_CHARS = envChars; sharedLedger.enabled = true; sharedLedger.lines = []; sharedLedger.dirty = false; },
+            disable() { sharedLedger.enabled = false; sharedLedger.lines = []; sharedLedger.dirty = false; },
+            save: serializeSharedLedger,
+            reload: loadSharedLedger,
+            state: sharedLedger,
+        },
         isContinuationRecoverySafe,
         isContextTooLongError,
         isInstantEmptyResponse,
