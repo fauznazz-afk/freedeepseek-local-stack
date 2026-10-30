@@ -237,24 +237,28 @@ semacam ini — bukan dari proxy.
 Proxy mendukung banyak akun DeepSeek. Kalau satu kena cooldown, request berikutnya
 otomatis pindah ke akun yang lain — **rotasi bekerja tanpa kode tambahan**.
 
-### Caranya
+### Cara terbaik: helper `add-account.ps1` (profil Chrome tersimpan)
+
+Ini mekanisme yang sama dengan akun utama (`npm run deepseek:auth`): setiap akun
+punya profil Chrome for Testing sendiri yang **disimpan dan tetap login**, jadi
+tokennya bisa dibetulkan ulang kapan saja dari sesi yang masih hidup — bukan
+ekspor cookie statis yang sifatnya sekali pakai dan cepat hangus.
 
 ```powershell
-# 1. Siapkan folder accounts (hanya sekali)
-mkdir D:\FreeDeepseekAPI\accounts
+# Akun baru: buka jendela Chrome, login dengan email akun itu, kirim satu
+# prompt singkat, lalu tekan Enter di terminal.
+pwsh -File local-stack\add-account.ps1 -Name akun2 -Restart
 
-# 2. Login di browser ke akun DeepSeek kedua (profil/email berbeda)
-# 3. Ekspor cookie (dengan ekstensi "Get cookies.txt LOCALLY" atau sejenis)
-#    Simpan sebagai D:\FreeDeepseekAPI\accounts\cookies-akun2.json
-
-# 4. Import ke proxy (minta token dari variabel, aman dari history shell)
-$env:DEEPSEEK_TOKEN = "<token akun kedua>"
-npm run auth:import -- --input D:\FreeDeepseekAPI\accounts\cookies-akun2.json
-# Output: "Wrote D:\FreeDeepseekAPI\accounts\akun2.json"
-
-# 5. Restart
-deepseek-local restart
+# Token mulai 401? Perbarui tanpa login ulang (profil masih ter-log-in):
+pwsh -File local-stack\add-account.ps1 -Name akun2 -Refresh -Restart
 ```
+
+- Profil disimpan di `.chrome-profiles\<nama>` (git-ignored).
+- File auth ditulis ke `accounts\<nama>.json` (git-ignored).
+- Port DevTools otomatis: 9334 + angka di nama (akun3 → 9337), jadi dua jendela
+  auth bisa jalan bersamaan.
+- Web Chrome sudah ada? Skrip otomatis pakai Chrome biasa; tanpa Chrome, ia
+  menawarkan instalasi (lihat `npm run deepseek:auth` untuk detail).
 
 ### Verifikasi
 
@@ -273,6 +277,22 @@ Dua akun berarti `2 ready` — kalau `akun1` cooling down, request masih dilayan
 
 > **Penting:** Akun harus benar-benar berbeda (email DeepSeek berbeda). Dua file
 > dari akun yang sama tetap berbagi kuota dan tidak menolong.
+
+### Cara manual: ekspor cookie browser biasa
+
+```powershell
+# 1. Login di browser ke akun DeepSeek kedua (profil/email berbeda)
+# 2. Ekspor cookie (ekstensi "Get cookies.txt LOCALLY" atau sejenis)
+#    Simpan sebagai D:\FreeDeepseekAPI\accounts\cookies-akun2.json
+# 3. Import ke proxy (minta token dari variabel, aman dari history shell)
+$env:DEEPSEEK_TOKEN = "<token akun kedua>"
+npm run auth:import -- --input D:\FreeDeepseekAPI\accounts\cookies-akun2.json
+# 4. Restart
+deepseek-local restart
+```
+
+Catatan: cara manual ini cepat habis — snapshot cookie ikut keusang WAF/token
+di browser asalnya. Untuk akun jangka panjang, pakai helper di atas.
 
 ### Alternatif: dashboard admin
 

@@ -6,6 +6,8 @@ deepseek-auth.json
 auth.json
 *.pem
 .chrome-for-testing-profile-deepseek/
+# Per-account dedicated Chrome profiles kept logged in for token refresh.
+.chrome-profiles/
 .freedeepseek-api/
 accounts/*.json
 /accounts/*.json
