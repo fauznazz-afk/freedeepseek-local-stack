@@ -48,6 +48,15 @@ function systemCandidates(platform, home, env) {
       'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
       'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
       env.LOCALAPPDATA && `${env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
+      // Chromium-family browsers drive the same DevTools protocol; searched only
+      // after every Chrome location so a real Chrome always wins when present.
+      env.LOCALAPPDATA && `${env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      env.PROGRAMFILES && `${env.PROGRAMFILES}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+      'C:\\Program Files (x86)\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+      env['ProgramFiles(x86)'] && `${env['ProgramFiles(x86)']}\\Microsoft\\Edge\\Application\\msedge.exe`,
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      env.LOCALAPPDATA && `${env.LOCALAPPDATA}\\Vivaldi\\Application\\vivaldi.exe`,
     ].filter((p, i, all) => p && all.indexOf(p) === i);
   }
   return [
@@ -56,6 +65,10 @@ function systemCandidates(platform, home, env) {
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
     '/snap/bin/chromium',
+    // Chromium-family fallbacks for when Google is not installed (Debian/Ubuntu names).
+    '/usr/bin/brave-browser',
+    '/usr/bin/microsoft-edge',
+    '/usr/bin/vivaldi',
   ];
 }
 

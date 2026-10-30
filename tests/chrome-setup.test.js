@@ -73,6 +73,19 @@ test('Linux search covers the usual Chrome and Chromium binaries', () => {
   assert.ok(paths.includes('/usr/bin/chromium-browser'));
 });
 
+test('Windows falls back to Chromium-family browsers when no Chrome exists', () => {
+  const brave = 'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe';
+  const found = chrome.locateChrome({
+    env: { PROGRAMFILES: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)' },
+    platform: 'win32',
+    home: 'C:\\Users\\me',
+    exists: existsOnly(brave),
+    readdir: () => [],
+  });
+  assert.equal(found.path, brave, 'Brave must be found once every Chrome location is absent');
+  assert.ok(found.checked.some(c => c.source === 'system' && /brave/i.test(c.path)), 'Brave is in the search list');
+});
+
 test('Homebrew is offered on macOS only, from its standard prefixes', () => {
   assert.equal(chrome.findBrew('darwin', existsOnly('/opt/homebrew/bin/brew')), '/opt/homebrew/bin/brew');
   assert.equal(chrome.findBrew('darwin', existsOnly('/usr/local/bin/brew')), '/usr/local/bin/brew');
