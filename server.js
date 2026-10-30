@@ -197,6 +197,7 @@ function serializeSessions() {
             messageCount: session.messageCount || 0,
             accountId: session.accountId || null,
             history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
+            memory: Array.isArray(session.memory) ? session.memory : [],
             sentSystemFingerprint: session.sentSystemFingerprint || null,
             conversationKey: session.conversationKey || null,
             lastActivityAt: session.lastActivityAt || Date.now(),
@@ -256,6 +257,7 @@ function loadSessions() {
                 messageCount: session.messageCount || 0,
                 accountId: session.accountId || null,
                 history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
+                memory: Array.isArray(session.memory) ? session.memory : [],
                 sentSystemFingerprint: session.sentSystemFingerprint || null,
                 conversationKey: session.conversationKey || null,
                 lastActivityAt: session.lastActivityAt || now,
@@ -313,6 +315,14 @@ const SESSION_TTL_MS = envNumber('DEEPSEEK_SESSION_TTL_MS', 2 * 60 * 60 * 1000);
 // TTL so a session that just expired upstream is still there to replay from.
 const SESSION_IDLE_EVICT_MS = envNumber('DEEPSEEK_SESSION_IDLE_EVICT_MS', SESSION_TTL_MS * 2);
 const MAX_SESSIONS_ON_DISK = Math.max(1, Math.floor(envNumber('DEEPSEEK_MAX_SESSIONS', 500)));
+
+// Session long-term memory ledger. When structured compaction has to drop a
+// middle turn outright, the durable facts inside it (paths, commands, errors)
+// are harvested into a per-session ledger and replayed at the head of every
+// recovery/rebuilt prompt. This is what keeps a long agent session workable
+// after its transcript has been forced through the context cap multiple times.
+const MAX_SESSION_MEMORY_CHARS = Math.max(1000, Math.floor(envNumber('DEEPSEEK_MAX_MEMORY_CHARS', 16000)));
+const SESSION_MEMORY_HEADER = '[Session memory: facts (paths, commands, errors) preserved from earlier turns that were dropped from this transcript.]';
 
 // === DeepSeek Web API Config — loaded from external config file ===
 const DS_CONFIG_PATH = process.env.DEEPSEEK_AUTH_PATH || path.join(__dirname, 'deepseek-auth.json');
@@ -971,6 +981,7 @@ function createSession() {
         messageCount: 0,
         accountId: null,
         history: [],
+        memory: [],
         sentSystemFingerprint: null,
         conversationKey: null,
         emptyStreak: 0,
@@ -3240,6 +3251,35 @@ function conversationFingerprint(messages) {
     return fingerprintPrompt(root);
 }
 
+// Long-term memory ledger helpers. `harvestSessionMemory` pulls the anchors
+// (paths, commands, errors) out of turn text that compaction dropped outright
+// and banks them on the session; `sessionMemoryText` renders the banked lines
+// as a prompt prefix for rebuilt sessions. Duplicates collapse across calls.
+function harvestSessionMemory(session, droppedText) {
+    if (!session || !droppedText || typeof droppedText !== 'string') return 0;
+    if (!Array.isArray(session.memory)) session.memory = [];
+    const anchors = contextLib.extractAnchors(droppedText, 200);
+    let added = 0;
+    for (const anchor of anchors) {
+        const line = String(anchor || '').trim().slice(0, 250);
+        if (line.length < 4 || session.memory.includes(line)) continue;
+        session.memory.push(line);
+        added++;
+    }
+    if (added > 0) {
+        let size = session.memory.reduce((n, l) => n + l.length + 1, 0);
+        while (size > MAX_SESSION_MEMORY_CHARS && session.memory.length > 1) {
+            size -= session.memory.shift().length + 1;
+        }
+        session.memory = session.memory.slice(-800);
+    }
+    return added;
+}
+function sessionMemoryText(session) {
+    if (!Array.isArray(session.memory) || session.memory.length === 0) return '';
+    return `${SESSION_MEMORY_HEADER}\n${session.memory.join('\n')}\n\n`;
+}
+
 function buildRecoveryHistoryPrefix(history) {
     if (!Array.isArray(history) || history.length === 0) return '';
     // Tell the model what this block is. Presented as plain transcript, a
@@ -3270,7 +3310,7 @@ function buildBoundedPrompt(systemPrompt, historyPrefix, conversationPrompt, max
     const safeMax = Math.max(1, Math.floor(Number(maxChars) || MAX_UPSTREAM_PROMPT_CHARS));
     const separatorLength = system && conversation ? 2 : 0;
     if (original.length <= safeMax) {
-        return { prompt: original, compacted: false, historyDropped: false, originalChars: original.length, promptChars: original.length };
+        return { prompt: original, compacted: false, historyDropped: false, originalChars: original.length, promptChars: original.length, droppedText: '' };
     }
 
     // Server-side history is only a recovery hint, so it yields to the
@@ -3285,7 +3325,13 @@ function buildBoundedPrompt(systemPrompt, historyPrefix, conversationPrompt, max
     const historyBudget = fixedLength < safeMax
         ? Math.min(history.length, historyShare, safeMax - fixedLength)
         : 0;
-    const boundedHistory = historyBudget > 0 ? compactConversation(history, historyBudget) : '';
+    let boundedHistory = historyBudget > 0 ? history : '';
+    let droppedText = '';
+    if (historyBudget > 0 && history.length > historyBudget) {
+        const historyResult = contextLib.structuredCompact(history, historyBudget);
+        boundedHistory = historyResult.text;
+        droppedText += historyResult.droppedText || '';
+    }
     const historyDropped = history.length > 0 && boundedHistory.length === 0;
     const historyBlock = boundedHistory ? `${boundedHistory}\n\n` : '';
     const currentConversation = conversation;
@@ -3304,7 +3350,12 @@ function buildBoundedPrompt(systemPrompt, historyPrefix, conversationPrompt, max
     // Preserve the start of the task/system instructions and the most recent
     // tool loop. The injected tool adapter lives at the end of systemPrompt.
     const boundedSystem = truncatePromptMiddle(system, systemBudget, 0.35);
-    const boundedConversation = compactConversation(currentConversation, conversationBudget);
+    let boundedConversation = currentConversation;
+    if (currentConversation.length > conversationBudget) {
+        const conversationResult = contextLib.structuredCompact(currentConversation, conversationBudget);
+        boundedConversation = conversationResult.text;
+        droppedText += conversationResult.droppedText || '';
+    }
     let bounded = boundedSystem
         ? `${boundedSystem}\n\n${historyBlock}${boundedConversation}`
         : `${historyBlock}${boundedConversation}`;
@@ -3325,6 +3376,7 @@ function buildBoundedPrompt(systemPrompt, historyPrefix, conversationPrompt, max
         originalChars: original.length,
         promptChars: bounded.length,
         autoCompacted,
+        droppedText,
     };
 }
 
@@ -4902,15 +4954,27 @@ const server = http.createServer(async (req, res) => {
             // Keep a recovery prompt available even while the upstream session
             // is healthy. If that remote chat expires mid-request, its opaque
             // state disappears and the replacement must receive local history.
+            // Banked session memory rides the recovery prefix: it is replayed
+            // when a remote chat is rebuilt, which is exactly when compaction
+            // history matters most. Sticky continuations skip it (the live chat
+            // already holds those turns).
             const recoveryHistoryPrefix = hasExplicitConversationHistory(messages)
                 ? ''
-                : buildRecoveryHistoryPrefix(session.history);
+                : sessionMemoryText(session) + buildRecoveryHistoryPrefix(session.history);
             const resolved = resolveUpstreamPrompt(session, messages, tools, recoveryHistoryPrefix, promptOptions);
             const historyPrefix = resolved.historyPrefix;
 
             const promptBuild = buildBoundedPrompt(resolved.systemPrompt, historyPrefix, resolved.conversation);
             if (promptBuild.autoCompacted) markContextCompacted(res);
+            if (promptBuild.droppedText) {
+                const added = harvestSessionMemory(session, promptBuild.droppedText);
+                if (added) console.log(`${agentTag} Session memory +${added} anchor(s), total ${session.memory.length}`);
+            }
             const freshPromptBuild = buildBoundedPrompt(systemPrompt, recoveryHistoryPrefix, prompt);
+            if (freshPromptBuild.droppedText) {
+                const added = harvestSessionMemory(session, freshPromptBuild.droppedText);
+                if (added) console.log(`${agentTag} Session memory +${added} anchor(s), total ${session.memory.length}`);
+            }
             let fullPrompt = pinToolReminder(promptBuild.prompt, tools, MAX_UPSTREAM_PROMPT_CHARS, promptOptions);
             const freshPrompt = pinToolReminder(freshPromptBuild.prompt, tools, MAX_UPSTREAM_PROMPT_CHARS, promptOptions);
             let promptCompacted = promptBuild.compacted;
@@ -5186,6 +5250,7 @@ const server = http.createServer(async (req, res) => {
                     ? null
                     : buildRetryPrompt(systemPrompt, recoveryHistoryPrefix, prompt, fullPrompt, retryBudget);
                 if (retryBuild?.autoCompacted) markContextCompacted(res);
+                if (retryBuild?.droppedText) harvestSessionMemory(session, retryBuild.droppedText);
                 const retryPrompt = keepSession
                     ? emptyResponseNudge(webFlags.search_enabled)
                     : pinToolReminder(
@@ -5927,6 +5992,10 @@ module.exports = {
         COOLDOWNS_FILE_PATH,
         buildBoundedPrompt,
         buildRetryPrompt,
+        harvestSessionMemory,
+        sessionMemoryText,
+        MAX_SESSION_MEMORY_CHARS,
+        SESSION_MEMORY_HEADER,
         isContinuationRecoverySafe,
         isContextTooLongError,
         isInstantEmptyResponse,

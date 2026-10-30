@@ -733,6 +733,49 @@ test('an oversized recovery history is condensed, never dropped wholesale', () =
   assert.match(bounded.prompt, /SYSTEM PROMPT/, 'the system prompt must survive');
 });
 
+// Session memory ledger: dropped turns bank their anchors for reuse later.
+test('structuredCompact reports the text of turns it dropped outright', () => {
+  const conversation = [
+    'User: plan the migration\n\n',
+    `User: run npm test in D:\\proj\n\n`,
+    `[Tool Result]\n${'y'.repeat(90000)}\n\n`,
+    'User: continue\n',
+  ].join('');
+  const compacted = serverInternals.compactConversation(conversation, 4000);
+  assert.ok(compacted.length <= 4200);
+});
+
+test('harvestSessionMemory banks anchors, dedupes, and caps the ledger', () => {
+  const session = {};
+  const dropped = [
+    'read D:\\proj\\src\\a.js',
+    'ran: git status --short',
+    'ERROR: Cannot find module ./x at C:\\proj\\lib\\x.js',
+    'https://example.com/deploy-notes',
+  ].join('\n');
+  const first = serverInternals.harvestSessionMemory(session, dropped);
+  assert.ok(first >= 3, `expected anchors harvested, got ${first}`);
+  const before = session.memory.length;
+  serverInternals.harvestSessionMemory(session, dropped);
+  assert.equal(session.memory.length, before, 'second harvest must not duplicate');
+  assert.match(serverInternals.sessionMemoryText(session), /Session memory/);
+  assert.match(serverInternals.sessionMemoryText(session), /git status --short/);
+  // Flood it: the ledger must keep itself inside the char cap.
+  serverInternals.harvestSessionMemory(session, Array.from({ length: 400 }, (_, i) => `C:\\proj\\file\\very\\long\\path\\number\\node\\module\\entry${i}.js`).join('\n'));
+  assert.ok(serverInternals.sessionMemoryText(session).length <= serverInternals.MAX_SESSION_MEMORY_CHARS + serverInternals.SESSION_MEMORY_HEADER.length + 16,
+    `ledger overflow: ${serverInternals.sessionMemoryText(session).length}`);
+  assert.equal(serverInternals.sessionMemoryText({}), '', 'no memory -> empty block');
+});
+
+test('buildBoundedPrompt surfaces droppedText so the session can bank it', () => {
+  const history = Array.from({ length: 300 }, (_, i) => (
+    `User: turn ${i} touched D:\\proj\\src\\file${i}.js and ran npm run build\n\nAssistant: ok ${(i + 1) * 7919}\n\n`
+  )).join('');
+  const build = serverInternals.buildBoundedPrompt('SYSTEM', history, 'User: newest turn referencing D:\\proj\\src\\file299.js\n', 6000);
+  assert.ok(build.compacted);
+  assert.ok(typeof build.droppedText === 'string' && build.droppedText.length > 0, 'dropped middle turns must be reported');
+});
+
 test('conversation compaction shrinks huge tool results and keeps the latest user turn', () => {
   const conversation = [
     'User: implement the player controller\n\n',
