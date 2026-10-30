@@ -117,6 +117,12 @@ to 9router. Runs on Windows on this machine.
   vision/pdf/audio/video pools at `ag/gemini-3.8-flash` (vision-capable, active,
   auto-refreshed Google token). `getSettings()` re-reads the DB per request, so
   the change applies without a restart; verified live via image test request.
+- DeepSeek web bounces over-length prompts with a 0-char stream mapped to a
+  502 "Сервер занят" (upstream's own Russian "server busy" text). Cap for the
+  upstream prompt is now 480000 chars via DEEPSEEK_MAX_PROMPT_CHARS in
+  settings.local.ps1 (was the 800k built-in default; a compaction result of
+  761k chars bounced repeatedly on 2026-10-30). Verified: 798k-char prompt
+  compacts to 479998 chars and answers normally.
 - Refreshing 9router's model list: the RUNNING build is bundled in
   `9router-source/cli/app/.next-cli-build/server/*.js` — editing
   `open-sse/providers/registry/*.js` alone has no effect until the bundle is
