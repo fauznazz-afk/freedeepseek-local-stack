@@ -323,6 +323,15 @@ const ACCOUNTS_DIR = process.env.DEEPSEEK_AUTH_DIR || path.join(__dirname, 'acco
 // matches the message the upstream actually sends; override with
 // DEEPSEEK_ACCOUNT_COOLDOWN_MS when running against a friendlier endpoint.
 const DEFAULT_ACCOUNT_COOLDOWN_MS = envNumber('DEEPSEEK_ACCOUNT_COOLDOWN_MS', 10 * 60 * 1000);
+// A login DeepSeek rejects as invalid (business code 40001-40003 / "Authorization
+// Failed (invalid token)") does not recover by waiting; two confirmed rejections
+// in a row quarantine it far longer than a burst window, so the failover loop
+// stops burning a PoW solve on a dead credential every request. A re-login writes
+// a new credential fingerprint, which drops the persisted quarantine.
+const DEFAULT_AUTH_EXPIRED_COOLDOWN_MS = envNumber('DEEPSEEK_AUTH_EXPIRED_COOLDOWN_MS', 30 * 60 * 1000);
+const AUTH_EXPIRED_PATTERN = /authorization failed|invalid token|4000[123]/i;
+// A WAF/PoW 401 is transient and must not count toward the quarantine ladder.
+const TRANSIENT_AUTH_PATTERN = /pow|challenge|waf/i;
 let DS_CONFIG = {};
 let dsHeaders = {};
 const accounts = [];
@@ -550,6 +559,7 @@ function accountStatus(account) {
         cookies: String(account.config.cookie || '').split(';').filter(Boolean).length,
         cooldown: cooling,
         cooldown_remaining_sec: cooling ? Math.max(0, Math.ceil((account.cooldownUntil - now) / 1000)) : 0,
+        cooldown_reason: cooling ? String(account.cooldownReason || 'rate_limit') : null,
         busy: Boolean(lock),
         busy_agent: lock?.agentId || null,
         // Lifetime count (the pre-admin /health contract). Consecutive failures,
@@ -818,17 +828,26 @@ function countAccountFailure(account, kind, status, detail) {
 }
 // Put a login on cooldown after DeepSeek throttled it (HTTP 429, a "too frequent"
 // message in any HTTP/JSON body, or an in-stream hint with rate_limit_reached).
-// Retry-After wins when present; otherwise DEEPSEEK_ACCOUNT_COOLDOWN_MS applies.
+// Retry-After wins when present; otherwise DEEPSEEK_ACCOUNT_COOLDOWN_MS applies,
+// escalating x2 up to 4x when DeepSeek re-throttles the login after its previous
+// window expired (a success or a 10-minute gap resets the ladder to the base).
 function markAccountRateLimited(account, detail = '', retryAfterRaw = null, status = 429, reason = '') {
     if (!account) return 0;
     const retryMs = parseRetryAfterMs(retryAfterRaw);
-    const cooldownMs = retryMs != null ? retryMs : DEFAULT_ACCOUNT_COOLDOWN_MS;
-    account.cooldownUntil = Math.max(account.cooldownUntil || 0, Date.now() + cooldownMs);
+    const now = Date.now();
+    const windowExpired = account.lastThrottledAt != null && (account.cooldownUntil || 0) <= now;
+    const ladderStale = now - (account.lastThrottledAt || 0) > 10 * 60 * 1000;
+    account.rlStreak = (windowExpired && !ladderStale) ? Math.min((account.rlStreak || 0) + 1, 3) : 1;
+    account.lastThrottledAt = now;
+    const baseCooldown = retryMs != null
+        ? retryMs
+        : Math.min(DEFAULT_ACCOUNT_COOLDOWN_MS * (2 ** (account.rlStreak - 1)), DEFAULT_ACCOUNT_COOLDOWN_MS * 4);
+    account.cooldownUntil = Math.max(account.cooldownUntil || 0, now + baseCooldown);
     account.cooldownReason = 'rate_limit';
     countAccountFailure(account, 'rate_limit', status, detail);
     cooldownStore.record(account);
-    console.log(`[account:${account.id}] rate-limited${reason ? ` (${reason})` : ''}: cooldown for ${Math.round(cooldownMs / 1000)}s${retryMs != null ? ' (Retry-After)' : ''} after HTTP ${status}: ${clipText(detail, 120)}`);
-    return cooldownMs;
+    console.log(`[account:${account.id}] rate-limited${reason ? ` (${reason})` : ''}: cooldown for ${Math.round(baseCooldown / 1000)}s${retryMs != null ? ' (Retry-After)' : (account.rlStreak > 1 ? ` (window ${account.rlStreak}x)` : '')} after HTTP ${status}: ${clipText(detail, 120)}`);
+    return baseCooldown;
 }
 function markAccountFailure(account, status, reason = '', retryAfterRaw = null, detail = '') {
     if (!account) return;
@@ -839,6 +858,21 @@ function markAccountFailure(account, status, reason = '', retryAfterRaw = null, 
     }
     if (code === 401 || code === 403) {
         countAccountFailure(account, 'auth', code, detail || `HTTP ${code}`);
+        // Only a confirmed dead credential builds the quarantine ladder. A WAF/PoW
+        // 401 is transient; accumulating it would quarantine healthy logins.
+        const detailText = String(detail || '');
+        if (code === 401 && !TRANSIENT_AUTH_PATTERN.test(detailText) && AUTH_EXPIRED_PATTERN.test(detailText)) {
+            account.authStrikes = (account.authStrikes || 0) + 1;
+        } else {
+            account.authStrikes = 0;
+        }
+        if (account.authStrikes >= 2) {
+            account.cooldownUntil = Math.max(account.cooldownUntil || 0, Date.now() + DEFAULT_AUTH_EXPIRED_COOLDOWN_MS);
+            account.cooldownReason = 'auth_expired';
+            cooldownStore.record(account);
+            console.log(`[account:${account.id}] credential rejected twice (${clipText(detailText, 100)}); quarantined for ${Math.round(DEFAULT_AUTH_EXPIRED_COOLDOWN_MS / 60000)}m. Re-login to clear.`);
+            return;
+        }
         account.cooldownUntil = Math.max(account.cooldownUntil || 0, Date.now() + DEFAULT_ACCOUNT_COOLDOWN_MS);
         account.cooldownReason = 'auth';
         cooldownStore.record(account);
@@ -852,6 +886,8 @@ function markAccountFailure(account, status, reason = '', retryAfterRaw = null, 
 function recordAccountSuccess(account) {
     if (!account) return;
     account.failures = 0;
+    account.authStrikes = 0;
+    account.rlStreak = 0;
     account.lastSuccessAt = Date.now();
     // The login answered, so any persisted cooldown for it is stale.
     cooldownStore.clear(account.id);
@@ -919,6 +955,7 @@ function createSession() {
         history: [],
         sentSystemFingerprint: null,
         conversationKey: null,
+        emptyStreak: 0,
         lastActivityAt: Date.now(),
     };
 }
@@ -5071,6 +5108,10 @@ const server = http.createServer(async (req, res) => {
             }
 
             if (initialCall) {
+                // Empty reply tracking: two completions in a row that produced
+                // reasoning but no content mean the remote chat is sick, not the
+                // prompt — the next retry must open a fresh chat (see the loop below).
+                session.emptyStreak = fullContent.trim() ? 0 : (session.emptyStreak || 0) + 1;
                 overflow = overflow
                     || isContextTooLongError(modelError)
                     || isInstantEmptyResponse({
@@ -5110,7 +5151,10 @@ const server = http.createServer(async (req, res) => {
                         messageId: lastMessageId,
                         elapsedMs: lastReadMs,
                     });
-                const keepSession = remoteSessionShouldStay(session, { overflow, modelError });
+                // A streak of reasoning-only completions marks the remote chat itself
+                // as unhealthy — continuing it just repeats the nudged-empty pattern.
+                const sickSession = !overflow && !isContextTooLongError(modelError) && (session.emptyStreak || 0) >= 2;
+                const keepSession = !sickSession && remoteSessionShouldStay(session, { overflow, modelError });
                 if (modelError && !overflow && !isContextTooLongError(modelError) && !keepSession) break;
                 const retryCap = overflow ? MAX_OVERFLOW_RETRIES : MAX_EMPTY_RETRIES;
                 if (retryAttempt >= retryCap) break;
@@ -5137,7 +5181,9 @@ const server = http.createServer(async (req, res) => {
                     promptCompacted = true;
                     markContextCompacted(res);
                 }
-                const reason = overflow ? 'context-too-long or instant-empty response' : 'empty response';
+                const reason = overflow
+                    ? 'context-too-long or instant-empty response'
+                    : (sickSession ? 'empty response (reasoning-only streak; opening a fresh chat)' : 'empty response');
                 if (keepSession) {
                     console.log(`${agentTag} ${reason} (msg#${session.messageCount}, retry ${retryAttempt}/${retryCap}). Continuing chat ${session.id}; not resending the transcript.`);
                 } else {
@@ -5158,6 +5204,7 @@ const server = http.createServer(async (req, res) => {
                     lastReadMs = retry.elapsedMs;
                     if (retryState.content && retryState.content.trim().length > 0) {
                         console.log(`${agentTag} Retry ${retryAttempt} succeeded`);
+                        session.emptyStreak = 0;
                         fullContent = retryState.content;
                         reasoningContent = retryState.reasoningContent;
                     } else {

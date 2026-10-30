@@ -15,6 +15,19 @@ param(
 $ErrorActionPreference = 'Stop'
 $fail = 0
 
+# When every login is cooling down (e.g. right after a rate-limit burst), the
+# completion check below is doomed no matter what. Wait once for the shortest
+# cooldown (capped, so a misconfigured 10-minute lock does not hang the script),
+# then proceed; the completion step reports the real state if it still fails.
+function Wait-ForCooldown {
+    try { $h = Invoke-RestMethod -Uri "http://127.0.0.1:$ProxyPort/health" -TimeoutSec 10 } catch { return }
+    $cooling = @($h.accounts | Where-Object { $_.ready -eq $false -and $_.has_credentials -eq $true })
+    if ($cooling.Count -lt $h.accounts.Count) { return }
+    $waitS = [Math]::Min(90, ($cooling | Measure-Object -Property cooldown_remaining_sec -Minimum).Minimum + 2)
+    Write-Host ("[wait] all {0} account(s) cooling down; waiting {1}s..." -f $h.accounts.Count, $waitS)
+    Start-Sleep -Seconds $waitS
+}
+
 function Step([string]$Name, [scriptblock]$Body) {
     try {
         $result = & $Body
@@ -29,6 +42,8 @@ Step 'proxy /health' {
     $r = Invoke-RestMethod -Uri "http://127.0.0.1:$ProxyPort/health" -TimeoutSec 10
     "status=$($r.status) models=$($r.models.Count) accounts=$($r.accounts.Count)"
 }
+
+Wait-ForCooldown
 
 Step 'proxy /v1/models' {
     $r = Invoke-RestMethod -Uri "http://127.0.0.1:$ProxyPort/v1/models" -TimeoutSec 10

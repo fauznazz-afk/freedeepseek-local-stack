@@ -1118,7 +1118,8 @@ Full table: [docs/models.md](docs/models.md).
 | `DEEPSEEK_REQUEST_DEADLINE_MS` | `120000` | Per-request deadline |
 | `DEEPSEEK_MAX_CONCURRENT` | `24` | Process-wide cap. Real parallelism is the number of idle logins |
 | `DEEPSEEK_ACCOUNT_LOCK_WAIT_MS` | `120000` | How long a second chat waits for a busy login |
-| `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | Cooldown after 401, 403, or a rate limit without `Retry-After`. DeepSeek throttles a browser session with "Слишком частые сообщения" — no header, so proxy defaults to 10 minutes. Lower at own risk. |
+| `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | Base cooldown after 401, 403, or a rate limit without `Retry-After`. DeepSeek throttles a browser session with "Слишком частые сообщения" — no header, so proxy defaults to 10 minutes. Lower at own risk. Without a `Retry-After`, the window escalates ×2 (up to ×4) each time the login is re-throttled right after its previous window expired; a successful request resets the ladder. |
+| `DEEPSEEK_AUTH_EXPIRED_COOLDOWN_MS` | `1800000` | Quarantine for a login whose credential DeepSeek rejects twice in a row as invalid (business code 40001–40003). A dead token does not recover by waiting; a re-login (new token/cookie file) clears it because the credential fingerprint changes. |
 | `DEEPSEEK_COOLDOWN_STATE_PATH` | `./data/cooldowns.json` | Where per-account cooldowns are persisted. A restart restores the cooldown so you cannot "restart your way out" of a throttle. Set empty to disable. |
 | `DEEPSEEK_GUARD_BLOCKS` | on | Fallback for the prompt guard blocks. `off` disables them process-wide; prefer the per-request `guard_blocks` body field. See [Refactor mode](#3-refactor-mode--per-request-guard-block-opt-out) |
 | `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one DeepSeek chat is reused before the proxy opens a fresh one and replays local history. Default 2 hours. See [Session lifetime](#session-lifetime-and-its-limits) |

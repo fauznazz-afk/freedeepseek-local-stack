@@ -2111,6 +2111,53 @@ test('a cooldown survives a restart, so restart cannot fake a fix', () => {
   assert.equal(account.cooldownReason, 'rate_limit');
 });
 
+{ // Adaptive cooldown + dead-credential quarantine touch the process-wide
+  // cooldown store; clean up every fake account id afterwards.
+  const fakeAccountIds = ['ladder_acct', 'dead_acct'];
+  test.after(() => {
+    try {
+      for (const id of fakeAccountIds) serverInternals.cooldownStore.clear(id);
+      serverInternals.cooldownStore.flush();
+    } catch (e) { /* best effort */ }
+  });
+
+  test('rate-limit cooldown escalates only across separate expiry windows', () => {
+    const account = { id: 'ladder_acct', config: { token: 't1', cookie: 'c1' }, cooldownUntil: 0 };
+    const first = serverInternals.markAccountRateLimited(account, 'too frequent', null, 200, 'test');
+    assert.equal(first, 600000, 'first window uses the base cooldown');
+    assert.equal(account.rlStreak, 1);
+    // A quick in-request retry while the window is still armed must NOT escalate.
+    const second = serverInternals.markAccountRateLimited(account, 'too frequent', null, 200, 'test');
+    assert.equal(second, 600000, 'retry inside the window keeps the base');
+    assert.equal(account.rlStreak, 1);
+    // Window elapsed without a success, DeepSeek throttles again -> double it.
+    account.cooldownUntil = Date.now() - 1;
+    const third = serverInternals.markAccountRateLimited(account, 'too frequent', null, 200, 'test');
+    assert.equal(third, 1200000, 're-throttle after an exhausted window doubles the window');
+    assert.equal(account.rlStreak, 2);
+    // A success resets the ladder.
+    serverInternals.recordAccountSuccess(account);
+    assert.equal(account.rlStreak, 0);
+  });
+
+  test('a credential rejected twice in a row is quarantined as auth_expired; a WAF 401 is not', () => {
+    const account = { id: 'dead_acct', config: { token: 'dead', cookie: 'dead' }, cooldownUntil: 0 };
+    const before = Date.now();
+    serverInternals.markAccountFailure(account, 401, 'completion', null, 'Authorization Failed (invalid token)');
+    assert.equal(account.authStrikes, 1);
+    assert.equal(account.cooldownReason, 'auth', 'one rejection is still a normal cooldown');
+    // A transient WAF/PoW 401 must not build the quarantine ladder...
+    serverInternals.markAccountFailure(account, 401, 'pow', null, 'PoW challenge for /api/v0/chat/completion');
+    assert.equal(account.authStrikes, 0, 'WAF/PoW 401 resets the ladder');
+    serverInternals.markAccountFailure(account, 401, 'session', null, 'Authorization Failed (invalid token)');
+    assert.equal(account.authStrikes, 1);
+    // ...so only two confirmed dead-credential rejections trigger the quarantine.
+    serverInternals.markAccountFailure(account, 401, 'session', null, 'Authorization Failed (invalid token)');
+    assert.equal(account.cooldownReason, 'auth_expired');
+    assert.ok(account.cooldownUntil >= before + 30 * 60 * 1000, 'quarantine lasts ~30 minutes');
+  });
+}
+
 test('a re-login does not inherit the previous login\'s cooldown', () => {
   const { createCooldownStore } = require('../lib/cooldowns');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-'));
