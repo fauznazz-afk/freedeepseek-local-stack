@@ -350,6 +350,14 @@ const MIN_UPSTREAM_PROMPT_CHARS = 16000;
 const CONTEXT_OVERFLOW_MIN_CHARS = 8000;
 const MAX_OVERFLOW_RETRIES = 3;
 const INSTANT_EMPTY_MS = 1500;
+// Share of the budget kept for an empty-response retry. A reasoning-only reply
+// usually means the model exhausted its thinking budget on a huge prompt, so
+// those retries must actually shrink (a 0.5x of a 619k prompt is still huge).
+function emptyRetryRatio(retryAttempt, { overflow = false, sickSession = false } = {}) {
+    if (overflow) return Math.max(0.15, 0.45 - retryAttempt * 0.15);
+    if (sickSession) return Math.max(0.2, 0.4 - retryAttempt * 0.2);
+    return Math.max(0.5, 1 - retryAttempt * 0.2);
+}
 const AUTO_COMPACT_RATIO = 0.90; // compact when prompt exceeds 85% of max
 // Share of the upstream prompt cap a replayed recovery history may claim. The
 // history is a hint, so it must not crowd out the live conversation; but it must
@@ -5160,9 +5168,7 @@ const server = http.createServer(async (req, res) => {
                 if (retryAttempt >= retryCap) break;
                 retryAttempt++;
 
-                const retryRatio = overflow
-                    ? Math.max(0.15, 0.45 - retryAttempt * 0.15)
-                    : Math.max(0.5, 1 - retryAttempt * 0.2);
+                const retryRatio = emptyRetryRatio(retryAttempt, { overflow, sickSession });
                 const minChars = overflow ? CONTEXT_OVERFLOW_MIN_CHARS : MIN_UPSTREAM_PROMPT_CHARS;
                 const retryBudget = Math.max(minChars, Math.floor(MAX_UPSTREAM_PROMPT_CHARS * retryRatio));
                 const retryBuild = keepSession
@@ -5888,6 +5894,7 @@ module.exports = {
         isNoToolsRequest,
         splitConversationTurns,
         compactConversation,
+        emptyRetryRatio,
         truncatePromptMiddle,
         autoCompactIfNeeded,
         structuredCompact: contextLib.structuredCompact,

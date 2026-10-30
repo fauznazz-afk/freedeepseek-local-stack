@@ -37,6 +37,14 @@ $env:DEEPSEEK_MAX_HISTORY_CHARS = "800000"
 # usually right - raising it makes each request heavier.
 # $env:DEEPSEEK_MAX_PROMPT_CHARS = "800000"
 
+# Per-request deadline (default 120s). DeepSeek thinking runs routinely past
+# 120s before emitting any content; 300s lets long reasoning finish.
+$env:DEEPSEEK_REQUEST_DEADLINE_MS = "300000"
+
+# Idle timeout per upstream stream (default 60s). Search + deep thinking can
+# pause the stream for a long time; 90s avoids aborting a stream still alive.
+# $env:DEEPSEEK_FETCH_TIMEOUT_MS = "90000"
+
 # --- Accounts ---------------------------------------------------------------
 # DeepSeek Web burst throttle usually resets in 15-30s. The proxy default of 10m
 # was too conservative; 30s allows fast recovery without long stalls.

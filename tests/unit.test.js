@@ -924,8 +924,25 @@ test('client-provided multi-turn history suppresses server recovery-history inje
   ]), true);
 });
 
-test('conversation fingerprint is stable within a chat and changes across chats', () => {
-  const chatA = [
+test('empty-response retry shrinks the prompt, most aggressively for reasoning-only chats', () => {
+  const ratio = serverInternals.emptyRetryRatio;
+  // Normal empty reply: keep most of the prompt (a hiccup, not a size problem).
+  assert.equal(ratio(0), 1);
+  assert.equal(ratio(1), 0.8);
+  assert.equal(ratio(5), 0.5, 'clamped at 0.5x');
+  // Reasoning-only streak: the model burned its budget on a huge prompt, so the
+  // retry needs to shrink hard (a 0.5x of a 619k prompt is still 619k/2).
+  assert.equal(ratio(0, { sickSession: true }), 0.4);
+  assert.equal(ratio(1, { sickSession: true }), 0.2);
+  assert.equal(ratio(3, { sickSession: true }), 0.2, 'clamped at 0.2x');
+  // Context overflow keeps its own tighter ladder.
+  assert.equal(ratio(0, { overflow: true }), 0.45);
+  assert.equal(ratio(4, { overflow: true }), 0.15);
+  // Overflow wins when both flags are set.
+  assert.equal(ratio(0, { overflow: true, sickSession: true }), 0.45);
+});
+
+test('conversation fingerprint is stable within a chat and changes across chats', () => {  const chatA = [
     { role: 'system', content: 'You are opencode' },
     { role: 'user', content: 'perbaiki bug login di server.js' },
     { role: 'user', content: 'lanjut' },
