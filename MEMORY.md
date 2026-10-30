@@ -102,6 +102,34 @@ to 9router. Runs on Windows on this machine.
   `Get-NetTCPConnection -State Listen` until empty (20s cap) before starting.
 - `git push` is rejected with `GH007` if the commit email is private on GitHub.
   This repo uses `193550268+fauznazz-afk@users.noreply.github.com`.
+- Reading the 9router DB: `9router-source/node_modules/better-sqlite3` has NO
+  compiled bindings (dead end), but Node's built-in `node:sqlite` (`DatabaseSync`)
+  works fine on the live `%APPDATA%/9router/db/data.sqlite` — copy the
+  `data.sqlite-wal`/`-shm` next to the copy under the same names (`*.sqlite-wal`)
+  or WAL content is missed. Working prebuilt bindings also exist in
+  `%APPDATA%/9router/runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node`.
+- The "lag 4–5 menit lalu sukses" pattern (2026-10-30) was NOT a combo the user
+  defined and NOT the proxy: 9router's **capacity adapter** prepends
+  `oc/mimo-v2.6-flash-free` (the hardcoded DEFAULT_FALLBACK_MODEL) whenever a
+  request needs vision and the target model lacks it, and that upstream hung
+  272s before answering 429 FreeUsageLimitError. Fix: write
+  `capacityAdapter` into the `settings` row (scope NOT `kv`) pointing
+  vision/pdf/audio/video pools at `ag/gemini-3.8-flash` (vision-capable, active,
+  auto-refreshed Google token). `getSettings()` re-reads the DB per request, so
+  the change applies without a restart; verified live via image test request.
+- Refreshing 9router's model list: the RUNNING build is bundled in
+  `9router-source/cli/app/.next-cli-build/server/*.js` — editing
+  `open-sse/providers/registry/*.js` alone has no effect until the bundle is
+  rebuilt. Follow `patch-deepseek.ps1`: exact-substring surgery on the
+  minified chunks with a backup in `%APPDATA%/9router/patch-backup/<stamp>`
+  (always verify via `IndexOf` on the BACKUP that the slice is the right
+  array — two registry copies and unrelated `models:[...]` arrays share ids).
+  Applied 2026-10-30: removed the stale oc/ static array
+  (muse-spark-1.2/1.3-contributor-free, union-alpha, jev-1.13-free — dead
+  upstream, verified against live https://opencode.ai/zen/v1/models); the
+  live-catalog passthrough in /v1/models now supplies exactly what upstream
+  lists. DeepSeek (ds/) model ids come from capabilities/pricing maps in the
+  same chunks and are unaffected.
 
 ## User preferences
 
