@@ -123,6 +123,13 @@ to 9router. Runs on Windows on this machine.
   settings.local.ps1 (was the 800k built-in default; a compaction result of
   761k chars bounced repeatedly on 2026-10-30). Verified: 798k-char prompt
   compacts to 479998 chars and answers normally.
+- Session memory ledger (2026-10-30, commit b2d5b57): when compaction loses a
+  turn (dropped outright, or condensed into a <120-char stub), its paths,
+  commands and errors are banked into `session.memory` (cap DEEPSEEK_MAX_MEMORY_CHARS=16000,
+  persisted in data/sessions.json) and replayed at the head of the recovery
+  prefix on the next reset/rebuild. Sticky continuations skip it (the live
+  remote chat still holds those turns). First production bank: 162 anchors on
+  unkeyed-00b5c6e89a38 from a 2M-char conversation.
 - Refreshing 9router's model list: the RUNNING build is bundled in
   `9router-source/cli/app/.next-cli-build/server/*.js` — editing
   `open-sse/providers/registry/*.js` alone has no effect until the bundle is
