@@ -17,12 +17,6 @@
 </p>
 
 <p align="center">
-  <strong>English</strong> ·
-  <a href="README.ru.md">Русский</a> ·
-  <a href="README.zh.md">简体中文</a>
-</p>
-
-<p align="center">
   <a href="#quick-start">Quick start</a> •
   <a href="#what-you-get">What you get</a> •
   <a href="#request-examples">Examples</a> •
