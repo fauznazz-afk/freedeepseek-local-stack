@@ -821,6 +821,29 @@ test('shared project ledger banks across sessions and renders with dedupe', () =
   assert.equal(serverInternals.recoveryMemoryPrefix({ memory: [] }).includes('Shared project memory'), false, 'disabled again -> no shared block');
 });
 
+test('overflow folds path families into per-directory summary lines', () => {
+  const hooks = serverInternals.sharedLedgerHooks;
+  hooks.configure(220);
+  try {
+    // 10 paths in ONE directory overflow a 220-char cap; folding keeps all
+    // filenames on one parent line instead of FIFO-evicting the older files.
+    const anchor = 'C:\\deploy\\widgets';
+    serverInternals.harvestSessionMemory({}, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => `${anchor}\\pane${n}.dart`).join('\n'));
+    const joined = hooks.state.lines.join('\n');
+    const size = hooks.state.lines.reduce((n, l) => n + l.length + 1, 0);
+    assert.match(joined, /C:\\deploy\\widgets/, 'parent dir survives');
+    assert.match(joined, /pane1\.dart/, 'first filename survives');
+    assert.match(joined, /pane10\.dart/, 'last filename survives');
+    assert.match(joined, /\{.*pane.*\.dart.*\}/, 'folded into a braced family line');
+    assert.ok(size <= 220 + 410, `folded ledger stays near its cap, got ${size}`);
+    // Mixed dirs and commands: non-path lines untouched.
+    serverInternals.harvestSessionMemory({}, 'ran: git status --short');
+    assert.ok(hooks.state.lines.some(l => l.includes('git status --short')), 'command line kept verbatim');
+  } finally {
+    hooks.disable();
+  }
+});
+
 test('buildBoundedPrompt surfaces droppedText so the session can bank it', () => {
   const history = Array.from({ length: 300 }, (_, i) => (
     `User: turn ${i} touched D:\\proj\\src\\file${i}.js and ran npm run build\n\nAssistant: ok ${(i + 1) * 7919}\n\n`

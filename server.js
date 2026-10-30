@@ -3301,10 +3301,48 @@ const sharedLedger = {
         this.lines.push(line);
         this.dirty = true;
         let size = this.lines.reduce((n, l) => n + l.length + 1, 0);
+        if (size > this.MAX_CHARS && this.lines.length > 3) {
+            this.compactPaths();
+            size = this.lines.reduce((n, l) => n + l.length + 1, 0);
+        }
         while (size > this.MAX_CHARS && this.lines.length > 1) {
             size -= this.lines.shift().length + 1;
         }
         if (this.lines.length > 800) this.lines = this.lines.slice(-800);
+    },
+    // Total size tripped the cap: fold path families into one line per parent
+    // directory ("parent\\ {a.js, b.js, ...}") before FIFO-evicting anything.
+    // Paths share long prefixes in real projects, so this buys many lines back
+    // without losing any filename. Retry caps the pass count for safety.
+    compactPaths() {
+        for (let pass = 0; pass < 3; pass++) {
+            const dirs = new Map();
+            const rebuilt = [];
+            for (const line of this.lines) {
+                const sepIndex = Math.max(line.lastIndexOf('\\'), line.lastIndexOf('/'));
+                if (sepIndex === -1 || sepIndex === 0) { rebuilt.push(line); continue; }
+                const key = line.slice(0, sepIndex);
+                const entry = dirs.get(key);
+                if (entry) { entry.children.push(line.slice(sepIndex + 1)); }
+                else {
+                    const added = { dir: key, sep: line[sepIndex], children: [line.slice(sepIndex + 1)] };
+                    dirs.set(key, added);
+                    rebuilt.push(added); // marker keeps first-seen order
+                }
+            }
+            const folded = [];
+            for (const item of rebuilt) {
+                if (typeof item === 'string') { folded.push(item); continue; }
+                if (item.children.length < 2) { folded.push(item.dir + item.sep + item.children[0]); continue; }
+                const names = item.children.join(', ');
+                const suffix = ' ...]';
+                const budget = 400;
+                const listing = names.length > budget ? names.slice(0, budget - suffix.length) + suffix : names;
+                folded.push(`${item.dir}${item.sep}{${listing}}`);
+            }
+            if (folded.length === this.lines.length) break; // nothing collapsed further
+            this.lines = folded;
+        }
     },
 };
 function sharedMemoryText() {
