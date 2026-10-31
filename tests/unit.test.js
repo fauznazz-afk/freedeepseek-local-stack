@@ -765,6 +765,27 @@ test('harvestSessionMemory banks anchors, dedupes, and caps the ledger', () => {
   assert.equal(serverInternals.sessionMemoryText({}), '', 'no memory -> empty block');
 });
 
+test('harvestSessionMemory banks decisions separately and renders a [decisions] block', () => {
+  const session = {};
+  const dropped = 'We chose SQLite because the repo has no dependencies.\n';
+  serverInternals.harvestSessionMemory(session, dropped);
+  assert.ok(session.decisions.length >= 1, 'decision sentence must be banked');
+  assert.match(session.decisions[0], /We chose SQLite/);
+  const rendered = serverInternals.sessionMemoryText(session);
+  assert.match(rendered, /\[decisions\]/);
+  assert.match(rendered, /We chose SQLite/);
+  const before = session.decisions.length;
+  serverInternals.harvestSessionMemory(session, dropped);
+  assert.equal(session.decisions.length, before, 'second harvest must not duplicate decisions');
+});
+
+test('looksLikeStalledNarration flags a bare announcement and nothing else', () => {
+  assert.equal(serverInternals.looksLikeStalledNarration('Saya akan cek file itu dulu.'), true);
+  assert.equal(serverInternals.looksLikeStalledNarration('Selesai. Tes lulus.'), false);
+  assert.equal(serverInternals.looksLikeStalledNarration('Let me run this: {"tool_call":{"name":"shell"}}'), false);
+  assert.equal(serverInternals.looksLikeStalledNarration('Saya akan cek file itu dulu?'), false);
+});
+
 test('ledger is per-session and leaves surviving anchors alone', () => {
   const a = {}, b = {};
   const text = 'ran: git status --short in D:\\proj\\src\\a.js';

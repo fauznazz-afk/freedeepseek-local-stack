@@ -198,6 +198,7 @@ function serializeSessions() {
             accountId: session.accountId || null,
             history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
             memory: Array.isArray(session.memory) ? session.memory : [],
+            decisions: Array.isArray(session.decisions) ? session.decisions : [],
             sentSystemFingerprint: session.sentSystemFingerprint || null,
             conversationKey: session.conversationKey || null,
             lastActivityAt: session.lastActivityAt || Date.now(),
@@ -259,6 +260,7 @@ function loadSessions() {
                 accountId: session.accountId || null,
                 history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
                 memory: Array.isArray(session.memory) ? session.memory : [],
+                decisions: Array.isArray(session.decisions) ? session.decisions : [],
                 sentSystemFingerprint: session.sentSystemFingerprint || null,
                 conversationKey: session.conversationKey || null,
                 lastActivityAt: session.lastActivityAt || now,
@@ -323,6 +325,7 @@ const MAX_SESSIONS_ON_DISK = Math.max(1, Math.floor(envNumber('DEEPSEEK_MAX_SESS
 // recovery/rebuilt prompt. This is what keeps a long agent session workable
 // after its transcript has been forced through the context cap multiple times.
 const MAX_SESSION_MEMORY_CHARS = Math.max(1000, Math.floor(envNumber('DEEPSEEK_MAX_MEMORY_CHARS', 16000)));
+const MAX_SESSION_DECISIONS_CHARS = 4000;
 const SESSION_MEMORY_HEADER = '[Session memory: facts (paths, commands, errors) preserved from earlier turns that were dropped from this transcript.]';
 
 // === DeepSeek Web API Config — loaded from external config file ===
@@ -1609,6 +1612,25 @@ function isDeepSeekNativeTool(name) {
 
 function isHarnessWebSearchTool(name) {
     return isDeepSeekNativeTool(name) && !/^(execute_code|code_interpreter)$/i.test(String(name || ''));
+}
+
+// A model that narrates "let me check the file" and stops has done no work.
+// False negatives are cheap here (the normal empty retry still runs); false
+// positives would nag a model that already answered, so the pattern is narrow.
+const STALLED_ANNOUNCEMENT = /\b(akan|mari saya|saya akan|let me|i will|i'll|next,? i|selanjutnya saya)\b/i;
+function looksLikeStalledNarration(text) {
+    const value = String(text || '').trim();
+    if (!value || value.length >= 1200) return false;
+    if (value.includes('{"tool_call"') || value.includes('tool_calls')) return false;
+    if (value.includes('```')) return false;
+    const lines = value.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (lines.length === 0) return false;
+    const last = lines[lines.length - 1];
+    if (last.endsWith('?')) return false;
+    return STALLED_ANNOUNCEMENT.test(last);
+}
+function stalledNarrationNudge() {
+    return '[STRICT INSTRUCTION] Your previous reply announced an action but performed none. Do not narrate again. Either make exactly one gateway tool call as {"tool_call":{"name":"<function>","arguments":{...}}} now, or give the final plain-text answer.';
 }
 
 function emptyResponseNudge(searchEnabled) {
@@ -3258,6 +3280,7 @@ function conversationFingerprint(messages) {
 function harvestSessionMemory(session, droppedText) {
     if (!session || !droppedText || typeof droppedText !== 'string') return 0;
     if (!Array.isArray(session.memory)) session.memory = [];
+    if (!Array.isArray(session.decisions)) session.decisions = [];
     const anchors = contextLib.extractAnchors(droppedText, 200);
     let added = 0;
     for (const anchor of anchors) {
@@ -3274,15 +3297,36 @@ function harvestSessionMemory(session, droppedText) {
         }
         session.memory = session.memory.slice(-800);
     }
+    // Decisions ride separately from anchors: the prose around them is what
+    // compaction loses, and a path alone does not say why anything was done.
+    for (const decision of contextLib.extractDecisions(droppedText, 12)) {
+        const line = String(decision || '').trim().slice(0, 200);
+        if (line.length < 8 || session.decisions.includes(line)) continue;
+        session.decisions.push(line);
+        if (sharedLedger.enabled && !session.memory.includes(line)) {
+            sharedLedger.bank(`[decision] ${line}`);
+        }
+    }
+    if (session.decisions.length > 0) {
+        let size = session.decisions.reduce((n, l) => n + l.length + 1, 0);
+        while (size > MAX_SESSION_DECISIONS_CHARS && session.decisions.length > 1) {
+            size -= session.decisions.shift().length + 1;
+        }
+        session.decisions = session.decisions.slice(-100);
+    }
     return added;
 }
 function sessionMemoryText(session, skipLines) {
-    if (!Array.isArray(session.memory) || session.memory.length === 0) return '';
+    const anchors = Array.isArray(session.memory) ? session.memory : [];
+    const decisions = Array.isArray(session.decisions) ? session.decisions : [];
+    if (anchors.length === 0 && decisions.length === 0) return '';
     const lines = skipLines instanceof Set
-        ? session.memory.filter(line => !skipLines.has(line))
-        : session.memory;
-    if (lines.length === 0) return '';
-    return `${SESSION_MEMORY_HEADER}\n${lines.join('\n')}\n\n`;
+        ? anchors.filter(line => !skipLines.has(line))
+        : anchors;
+    let text = `${SESSION_MEMORY_HEADER}\n`;
+    if (lines.length > 0) text += `${lines.join('\n')}\n`;
+    if (decisions.length > 0) text += `[decisions]\n${decisions.join('\n')}\n`;
+    return `${text}\n`;
 }
 
 // Shared project ledger: every session's anchors banked into one file, so a
@@ -5375,10 +5419,16 @@ const server = http.createServer(async (req, res) => {
                     : buildRetryPrompt(systemPrompt, recoveryHistoryPrefix, prompt, fullPrompt, retryBudget);
                 if (retryBuild?.autoCompacted) markContextCompacted(res);
                 if (retryBuild?.droppedText) harvestSessionMemory(session, retryBuild.droppedText);
+                // Refactor mode (guards off) keeps the model talking through a patch:
+                // its answer IS prose, so a stalled-narration nudge would fight it.
+                const stalled = keepSession
+                    && promptOptions.guards !== false
+                    && looksLikeStalledNarration(fullContent);
+                const nudge = stalled ? stalledNarrationNudge() : emptyResponseNudge(webFlags.search_enabled);
                 const retryPrompt = keepSession
-                    ? emptyResponseNudge(webFlags.search_enabled)
+                    ? nudge
                     : pinToolReminder(
-                        appendPromptInstruction(retryBuild.prompt, emptyResponseNudge(webFlags.search_enabled), retryBudget),
+                        appendPromptInstruction(retryBuild.prompt, nudge, retryBudget),
                         tools,
                         retryBudget,
                         promptOptions,
@@ -6088,6 +6138,8 @@ module.exports = {
         looksLikeCodeDumpInsteadOfTool,
         isDeepSeekNativeTool,
         emptyResponseNudge,
+        stalledNarrationNudge,
+        looksLikeStalledNarration,
         nativeToolRepairPrompt,
         noToolsRepairPrompt,
         noToolsContract,
@@ -6121,6 +6173,7 @@ module.exports = {
         sessionMemoryText,
         recoveryMemoryPrefix,
         MAX_SESSION_MEMORY_CHARS,
+        MAX_SESSION_DECISIONS_CHARS,
         SESSION_MEMORY_HEADER,
         sharedLedgerHooks: {
             configure(envChars = 16000) { sharedLedger.MAX_CHARS = envChars; sharedLedger.enabled = true; sharedLedger.lines = []; sharedLedger.dirty = false; },
