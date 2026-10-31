@@ -2685,6 +2685,11 @@ function buildUsage(prompt, content, reasoningContent = '') {
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
         total_tokens: promptTokens + completionTokens,
+        prompt_tokens_details: {
+            // The web lane has no upstream token billing, so prompt cache hits
+            // do not exist here; report the OpenAI-compatible field anyway.
+            cached_tokens: 0
+        },
         completion_tokens_details: {
             reasoning_tokens: reasoningTokens
         }
@@ -6134,6 +6139,7 @@ module.exports = {
         fingerprintPrompt,
         continuationMessages,
         sanitizeContent,
+        buildUsage,
         extractScreenshotPaths,
         resolveUpstreamPrompt,
         stripHarnessWebSearchTools,

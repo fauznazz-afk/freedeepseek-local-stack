@@ -1766,6 +1766,15 @@ test('OpenAI stream emits a usage chunk before DONE so clients can show tokens',
   assert.ok(body.indexOf('"usage"') < body.indexOf('[DONE]'));
 });
 
+test('buildUsage reports the OpenAI prompt_tokens_details.cached_tokens field as 0 (web lane has no cache)', () => {
+  const usage = serverInternals.buildUsage('a'.repeat(800), 'b'.repeat(40), 'c'.repeat(20));
+  assert.equal(usage.prompt_tokens, 200);
+  assert.deepEqual(usage.prompt_tokens_details, { cached_tokens: 0 });
+  assert.equal(usage.completion_tokens, 15);
+  assert.equal(usage.completion_tokens_details.reasoning_tokens, 5);
+  assert.equal(usage.total_tokens, 215);
+});
+
 test('one-click agent setup adds opt-in providers without replacing native defaults', () => {
   const dir = tmpdir();
   fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
