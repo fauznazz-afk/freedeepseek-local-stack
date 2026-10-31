@@ -69,7 +69,7 @@ anggap lengkap" — supaya sesi hasil rebuild tidak terbaca sebagai riwayat utuh
 
 | Env var | Default | Arti |
 |---|---|---|
-| `DEEPSEEK_MAX_PROMPT_CHARS` | 800000 | Plafon prompt ke upstream |
+| `DEEPSEEK_MAX_PROMPT_CHARS` | 800000 (mesin ini 480000) | Plafon prompt ke upstream |
 | `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | 600000 | Cooldown akun saat kena rate limit |
 
 Cooldown 10 menit mengikuti pesan asli DeepSeek ("Слишком частые сообщения"

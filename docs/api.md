@@ -251,12 +251,38 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 | `PROXY_ADMIN_ALLOW_REMOTE` | off | If `1`, `/admin/*` answers non-loopback clients without `PROXY_API_KEY` |
 | `DEEPSEEK_AUTH_PATH` | `./deepseek-auth.json` | One file, or comma-separated list |
 | `DEEPSEEK_AUTH_DIR` | `./accounts` if present | All `*.json` in that directory |
+| `PROXY_CORS_ORIGINS` | loopback | Extra exact browser origins |
 | `DEEPSEEK_MAX_CONCURRENT` | `24` | Process-wide cap. Real parallelism is **number of idle logins** |
 | `DEEPSEEK_ACCOUNT_LOCK_WAIT_MS` | `120000` | How long a second chat waits for a busy login |
 | `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | After 401/403, or a rate limit without `Retry-After` |
+| `DEEPSEEK_AUTH_EXPIRED_COOLDOWN_MS` | `1800000` | Quarantine for a login rejected twice in a row as invalid. A re-login clears it |
+| `DEEPSEEK_COOLDOWN_STATE_PATH` | `./data/cooldowns.json` | Cooldowns survive a restart. Empty disables |
+| `DEEPSEEK_MAX_PROMPT_CHARS` | `800000` | Upstream prompt cap in characters. Minimum 16000 |
+| `DEEPSEEK_MAX_RETRIES` | `2` | Empty-reply retries on the same chat |
+| `DEEPSEEK_REQUEST_DEADLINE_MS` | `120000` | Per-request deadline |
+| `DEEPSEEK_FETCH_TIMEOUT_MS` | `60000` | Idle timeout per upstream stream |
+| `DEEPSEEK_GUARD_BLOCKS` | on | Fallback for the prompt guard blocks. Prefer the per-request `guard_blocks` body field |
+| `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one Web chat is reused before a fresh one is opened |
+| `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Messages per chat before a forced reset. Minimum 2 |
+| `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Local turns replayed into a replacement chat. Raise with `MAX_MESSAGE_DEPTH` |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Char budget for that replay. Minimum 1000 |
+| `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Per-session ledger of dropped paths, commands and errors |
+| `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Shared project ledger inherited by new agent keys. `0` = off |
+| `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | How long an idle session survives on disk |
+| `DEEPSEEK_MAX_SESSIONS` | `500` | Session cap loaded from disk at startup |
 | `TRUST_PROXY` | off | If `1`, client IP uses `X-Forwarded-For` |
 | `PROXY_BASE_URL` | listen address | Address written into agent configs by the Agents page and `setup:agents` |
 | `SETUP_HOME` | OS home | Home folder whose agent configs the Agents page and `setup:agents` read and write |
 | `MAX_REQUEST_BODY_BYTES` | `31457280` | Maximum JSON body size, including base64 images |
+| `NON_INTERACTIVE` / `SKIP_ACCOUNT_MENU` | off | Skip the launch menu |
+
+Values above are built-in defaults. `local-stack/settings.local.ps1` overrides
+them per machine and is git-ignored; `start.ps1` dot-sources it on every launch.
+The current machine raises `DEEPSEEK_MAX_PROMPT_CHARS` and
+`DEEPSEEK_MAX_HISTORY_CHARS` to `480000`, sets `DEEPSEEK_REQUEST_DEADLINE_MS`
+to `300000` and `DEEPSEEK_ACCOUNT_COOLDOWN_MS` to `30000`, and turns the shared
+memory ledger on. A fresh clone gets the built-in defaults until `npm run setup`
+copies the example and you edit it. Source of truth: `README.md` →
+[Konfigurasi env](../README.md#konfigurasi-env).
 
 Docker: [`Containerfile`](../Containerfile). Auth: [`auth.md`](auth.md). Models: [`models.md`](models.md).
