@@ -1682,11 +1682,24 @@ function stableToolKey(name, args) {
     const payload = typeof args === 'string' ? args : JSON.stringify(args || {});
     return `${name}: ${String(payload || '').slice(0, 120)}`;
 }
-function detectRepeatedToolCall(calls) {
+function detectRepeatedToolCall(calls, threshold = 3) {
+    // A streak, not the whole window: one different call afterwards must not
+    // hide three identical calls that already failed.
     const list = (calls || []).filter(Boolean);
-    if (list.length < 3) return null;
-    const key = stableToolKey(list[0].name, list[0].args);
-    return list.every(call => stableToolKey(call.name, call.args) === key) ? key : null;
+    if (list.length < threshold) return null;
+    let run = 1;
+    let last = stableToolKey(list[0].name, list[0].args);
+    for (let i = 1; i < list.length; i++) {
+        const key = stableToolKey(list[i].name, list[i].args);
+        if (key === last) {
+            run++;
+            if (run >= threshold) return key;
+        } else {
+            run = 1;
+            last = key;
+        }
+    }
+    return null;
 }
 function toolLoopNudge(key) {
     return `[STRICT INSTRUCTION] You already ran this exact call three times (${key}) and it did not move the task forward. Do not repeat it. Change approach with one different gateway tool call as {"tool_call":{"name":"<function>","arguments":{...}}}, or stop and report the blocker in plain text.`;

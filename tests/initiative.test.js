@@ -67,6 +67,24 @@ test('a repeated identical tool call is a loop, a different one is not', () => {
   assert.equal(s.detectRepeatedToolCall([]), null);
 });
 
+test('a different call after the streak does not hide the loop', () => {
+  const streakThenOther = [
+    { name: 'shell', args: { command: 'npm test' } },
+    { name: 'shell', args: { command: 'npm test' } },
+    { name: 'shell', args: { command: 'npm test' } },
+    { name: 'read', args: { path: 'a.js' } },
+  ];
+  assert.equal(s.detectRepeatedToolCall(streakThenOther), 'shell: {"command":"npm test"}');
+  // Two identical calls inside a longer mixed run are still not a loop.
+  const mixed = [
+    { name: 'read', args: { path: 'a.js' } },
+    { name: 'shell', args: { command: 'npm test' } },
+    { name: 'shell', args: { command: 'npm test' } },
+    { name: 'read', args: { path: 'b.js' } },
+  ];
+  assert.equal(s.detectRepeatedToolCall(mixed), null);
+});
+
 test('the repeat threshold is three, so two tries are still a legitimate retry', () => {
   const twice = [
     { name: 'read', args: { path: 'a.js' } },
