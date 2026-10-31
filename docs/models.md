@@ -1,8 +1,8 @@
 # Models
 
-One model: **DeepSeek-V4.1-Flash**. The proxy talks to [chat.deepseek.com](https://chat.deepseek.com), not the paid `api.deepseek.com` key.
+One model: **DeepSeek-V4.1-Flash** (upstream release 2026-10-17). The proxy talks to [chat.deepseek.com](https://chat.deepseek.com), not the paid `api.deepseek.com` key.
 
-`deepseek-flash` is a short alias of `deepseek-v4-flash`. The suffixes are the two switches from the DeepSeek chat composer. They do not select a different model.
+`deepseek-flash` is the official paid-API ID for V4.1-Flash. On this proxy it is an alias of `deepseek-v4-flash`: `canonicalizeModelId()` rewrites any `deepseek-flash*` prefix to `deepseek-v4-flash*`, so both spellings reach the same Web weight. The suffixes are the two switches from the DeepSeek chat composer. They do not select a different model.
 
 | ID | DeepThink | Native web search |
 |---|---|---|
@@ -19,7 +19,7 @@ One model: **DeepSeek-V4.1-Flash**. The proxy talks to [chat.deepseek.com](https
 
 **Former `-search` IDs.** `deepseek-v4-flash-search` and `deepseek-v4-flash-thinking-search` still work and mean `deepseek-v4-flash` and `deepseek-v4-flash-thinking`. They are not listed in `/v1/models`.
 
-Older IDs are not registered: `deepseek-v4-pro`, `deepseek-chat`, `deepseek-reasoner`, `deepseek-r1`, `deepseek-instant`, `deepseek-expert`, and vision. They return `400 invalid_model`.
+**Not served.** `deepseek-v4-pro` (V4-Pro 0813) exists on the paid API, but the Web chat no longer offers a Pro weight, so it returns `400 invalid_model` here. Also not registered: `deepseek-chat`, `deepseek-reasoner` (retired upstream 2026-07-24), `deepseek-r1`, `deepseek-instant`, `deepseek-expert`, and vision.
 
 Claude Code names such as `claude-sonnet-*` and `claude-opus-*` map onto DeepSeek-V4.1-Flash and DeepSeek-V4.1-Flash with DeepThink.
 

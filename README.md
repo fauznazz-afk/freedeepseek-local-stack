@@ -33,7 +33,8 @@ mana pun ke sini.
 Proxy memakai akun DeepSeek yang sudah kamu login di browser. Tidak ada API key
 berbayar `api.deepseek.com`.
 
-Satu model tersedia: **DeepSeek-V4.1-Flash**. Native Web Search chat.deepseek.com
+Satu model tersedia: **DeepSeek-V4.1-Flash** (rilis upstream 2026-10-17; ID API resmi
+`deepseek-flash`, alias di proxy ini). Native Web Search chat.deepseek.com
 **nyala secara default**, dan pencarian itulah yang menjawab pertanyaan internet
 terbaru. `-thinking` menyalakan DeepThink. `-nosearch` atau `"web_search": false`
 mematikan pencarian.
@@ -412,8 +413,9 @@ Lewat 9router, provider `ds` (DeepSeek) diarahkan ke proxy lokal dengan prefix
 `ds/`. Lewat OpenCode langsung (tanpa 9router), prefix `freedeepseek/`.
 
 ID lama tidak terdaftar dan mengembalikan `400 invalid_model`:
-`deepseek-chat`, `deepseek-reasoner`, `deepseek-r1`, `deepseek-v3`,
-`deepseek-instant`, `deepseek-expert`, `deepseek-v4-pro`.
+`deepseek-chat`, `deepseek-reasoner` (pensiun upstream 2026-07-24),
+`deepseek-r1`, `deepseek-v3`, `deepseek-instant`, `deepseek-expert`.
+`deepseek-v4-pro` juga tidak dilayani: Web chat tidak lagi menyediakan bobot Pro.
 
 ---
 
