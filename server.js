@@ -1707,8 +1707,11 @@ function toolLoopNudge(key) {
 // History stores tool calls as prose (TOOL_CALL: name / arguments: {...}), and
 // some older entries carry the OpenAI tool_calls array. Accept both shapes.
 function recentToolCalls(session, limit = 12) {
+    // Bound the calls too: one history entry can carry several tool calls, and an
+    // uncapped list would make the loop check look past entries it never scanned.
     const entries = (session?.history || []).slice(-limit);
     const calls = [];
+    const push = (name, args) => { if (calls.length < limit) calls.push({ name, args }); };
     for (const entry of entries) {
         const openAi = Array.isArray(entry?.tool_calls) ? entry.tool_calls : [];
         for (const call of openAi) {
@@ -1716,14 +1719,14 @@ function recentToolCalls(session, limit = 12) {
             if (!name) continue;
             let args = call?.function?.arguments ?? call?.arguments ?? {};
             if (typeof args === 'string') { try { args = JSON.parse(args); } catch { /* keep raw */ } }
-            calls.push({ name: String(name).trim(), args });
+            push(String(name).trim(), args);
         }
         const text = String(entry?.assistant || '');
         const match = /^TOOL_CALL:\s*(\S+)\s*\narguments:\s*([\s\S]*)$/m.exec(text);
         if (!match) continue;
         let args = match[2].trim();
         try { args = JSON.parse(args); } catch { /* keep the raw string */ }
-        calls.push({ name: match[1].trim(), args });
+        push(match[1].trim(), args);
     }
     return calls;
 }
@@ -3718,6 +3721,8 @@ function looksLikeAbandonedToolLoop(text, messages) {
     if (!lastTurnIsToolResult(messages)) return false;
     const value = String(text || '').trim();
     if (!value || looksLikeToolCallMarkup(value) || looksLikeCodeDumpInsteadOfTool(value)) return false;
+    // A final answer, not a stop. The English-only list missed "Selesai." and "tests pass".
+    if (FINISHED_MARKER.test(value)) return false;
     if (/\b(done|completed|fixed|finished|готово|сделано)\b/i.test(value)) return false;
     return value.length < 600;
 }
@@ -5728,12 +5733,17 @@ const server = http.createServer(async (req, res) => {
             const shouldRepairNative = !noToolsMode && !toolCall && (Boolean(ignoredNativeTool) || nativeOnlyDsml);
             const shouldRepairMarkup = !noToolsMode && !toolCall && !shouldRepairNative && looksLikeToolCallMarkup(fullContent);
             const shouldRepairCodeDump = !noToolsMode && allowedToolNames.size > 0 && !toolCall && !shouldRepairMarkup && !shouldRepairNative && looksLikeCodeDumpInsteadOfTool(fullContent);
-            const shouldRepairAbandoned = !noToolsMode && allowedToolNames.size > 0 && !toolCall && !shouldRepairMarkup && !shouldRepairNative && !shouldRepairCodeDump && looksLikeAbandonedToolLoop(fullContent, messages);
+            // A reply after a tool result that announces a plan or asks permission is
+            // the initiative case, not the abandoned-tool case. Both paths send a strict
+            // retry, so only one may fire or the request burns two attempts.
+            const initiativeSignal = !noToolsMode && (looksLikeUnstartedPlan(fullContent)
+                || (promptOptions.autonomy === true && looksLikePermissionPause(fullContent)));
+            const shouldRepairAbandoned = !noToolsMode && allowedToolNames.size > 0 && !toolCall && !shouldRepairMarkup && !shouldRepairNative && !shouldRepairCodeDump && !initiativeSignal && looksLikeAbandonedToolLoop(fullContent, messages);
             const shouldRepairNoTools = noToolsMode && guardBlocksOn && !toolCall && !shouldRepairNative && looksLikeToolCallMarkup(fullContent);
             let repairRateLimitError = null;
             let repairUnavailable = false;
             let repairAttempts = 0;
-            if ((shouldRepairMarkup || shouldRepairCodeDump || shouldRepairNative || shouldRepairAbandoned || shouldRepairNoTools) && !clientGone && !deadlineHit()) {
+            if ((shouldRepairMarkup || shouldRepairCodeDump || shouldRepairNative || shouldRepairAbandoned || shouldRepairNoTools || initiativeSignal) && !clientGone && !deadlineHit()) {
                 const reason = shouldRepairNoTools
                     ? 'Model emitted tool markup but this request has no tools'
                     : (shouldRepairNative
@@ -5742,7 +5752,9 @@ const server = http.createServer(async (req, res) => {
                             ? 'Tool-call markup detected but invalid/truncated'
                             : (shouldRepairCodeDump
                                 ? 'Model dumped source code instead of a tool request'
-                                : 'Model stopped after a tool result without a next tool call')));
+                                : (initiativeSignal
+                                    ? 'Model described the next step instead of doing it'
+                                    : 'Model stopped after a tool result without a next tool call'))));
                 console.log(`${agentTag} ${reason} (${fullContent.length} chars). Retrying with stricter prompt on the same session...`);
                 const strictPrompt = shouldRepairNoTools
                     ? noToolsRepairPrompt()
@@ -5752,7 +5764,9 @@ const server = http.createServer(async (req, res) => {
                             ? '[STRICT INSTRUCTION] Your previous response contained incomplete tool-call markup. Keep arguments short and output ONLY strict JSON: {"tool_call":{"name":"<function>","arguments":{...}}}'
                             : (shouldRepairCodeDump
                                 ? '[STRICT INSTRUCTION] You pasted source code as plain text. This gateway cannot apply pasted files. Request exactly one tool to write or edit the file. Output ONLY strict JSON: {"tool_call":{"name":"<function>","arguments":{...}}}. Put file contents in the tool arguments, not in markdown fences.'
-                                : '[STRICT INSTRUCTION] You stopped after a tool result. Continue the task. Output exactly one gateway tool request as {"tool_call":{"name":"<function>","arguments":{...}}} or a complete final answer if the work is finished.')));
+                                : (initiativeSignal
+                                    ? (promptOptions.autonomy === true && looksLikePermissionPause(fullContent) ? permissionPauseNudge() : planNudge())
+                                    : '[STRICT INSTRUCTION] You stopped after a tool result. Continue the task. Output exactly one gateway tool request as {"tool_call":{"name":"<function>","arguments":{...}}} or a complete final answer if the work is finished.'))));
                 // The repair call keeps full request context and can fail over to a
                 // ready login if the current one is rate-limited.
                 const repairRecoveryPrompt = appendPromptInstruction(freshPrompt, strictPrompt);

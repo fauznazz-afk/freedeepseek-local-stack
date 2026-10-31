@@ -262,6 +262,7 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 | `DEEPSEEK_REQUEST_DEADLINE_MS` | `120000` | Per-request deadline |
 | `DEEPSEEK_FETCH_TIMEOUT_MS` | `60000` | Idle timeout per upstream stream |
 | `DEEPSEEK_GUARD_BLOCKS` | on | Fallback for the prompt guard blocks. Prefer the per-request `guard_blocks` body field |
+| `agent_autonomy` body / `x-agent-autonomy` header | off | Opt-in. Nudges an unstarted plan, a permission question, or a repeated tool call. On values: `full`, `on`, `1`, `true`, `yes`. Off when `guard_blocks` is false |
 | `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one Web chat is reused before a fresh one is opened |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Messages per chat before a forced reset. Minimum 2 |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Local turns replayed into a replacement chat. Raise with `MAX_MESSAGE_DEPTH` |

@@ -295,8 +295,8 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 | Login ulang DeepSeek | `npm run auth` |
 | Diagnosa | `npm run doctor` |
 | Tes unit | `node --test tests/unit.test.js` — 125 pass, 0 fail |
-| Tes inisiatif | `node --test tests/initiative.test.js` - 8 pass, 0 fail |
-| Tes penuh | `npm test` - 332 pass, 13 fail (baseline) |
+| Tes inisiatif | `node --test tests/initiative.test.js tests/initiative-overlap.test.js` - 13 pass, 0 fail |
+| Tes penuh | `npm test` - 337 pass, 13 fail (baseline) |
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
 menjalankan proses kedua.
@@ -702,9 +702,9 @@ pakai field body `"agent_autonomy": true`.
 
 ```powershell
 node --test tests/unit.test.js     # 125 pass, 0 fail
-npm test                           # 332 pass, 13 fail
+npm test                           # 337 pass, 13 fail
 node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
-node --test tests/initiative.test.js                               # 8 pass, 0 fail
+node --test tests/initiative.test.js tests/initiative-overlap.test.js   # 13 pass, 0 fail
 ```
 
 13 kegagalan `npm test` sudah ada sejak baseline upstream — butuh Chrome, macOS,
