@@ -665,7 +665,7 @@ node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0
 node --test tests/initiative.test.js                               # 7 pass, 0 fail
 ```
 
-14 kegagalan `npm test` sudah ada sejak baseline upstream — butuh Chrome, macOS,
+13 kegagalan `npm test` sudah ada sejak baseline upstream — butuh Chrome, macOS,
 atau tooling yang tidak ada di mesin ini. Bukan regresi dari perubahan lokal.
 Pakai `node --test tests/unit.test.js` untuk sinyal bersih.
 

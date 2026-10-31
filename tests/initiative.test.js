@@ -26,6 +26,8 @@ const BLOCKED_QUESTIONS = [
   'Mau saya perbaiki sekarang?',
   'Saya sudah baca file itu. Mau saya lanjut?',
   'Should I run the tests?',
+  'Saya lanjutkan ya?',
+  'Want me to continue?',
 ];
 
 test('a plan that was never executed is an initiative gap', () => {

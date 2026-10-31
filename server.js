@@ -1665,7 +1665,7 @@ function planNudge() {
 // blockers are left alone: they name a choice only the user can make, or an
 // irreversible action. This is opt-in (x-agent-autonomy), never on by default,
 // because many clients expect the model to ask before it acts.
-const PERMISSION_QUESTION = /(?:\b(?:mau|ingin|perlu|boleh)\b[^?\n]{0,80}\?|\b(?:should|shall|may|do you want|would you like) i\b[^?\n]{0,80}\?)/i;
+const PERMISSION_QUESTION = /(?:\b(?:mau|ingin|perlu|boleh)\b[^?\n]{0,80}\?|\b(?:should|shall|may)\s+i\b[^?\n]{0,80}\?|\b(?:do you want|would you like|want me)\b[^?\n]{0,80}\?|\b(?:saya|aku)\s+lanjut\w*\s+(?:ya|kah)?\s*\?)/i;
 const REAL_BLOCKER = /\b(?:kredensial|credential|password|token|akun mana|which account|api key|tidak bisa dibatalkan|irreversible|hapus semua|delete all|drop table)\b/i;
 function looksLikePermissionPause(text) {
     const value = String(text || '').trim();
