@@ -64,6 +64,7 @@ mematikan pencarian.
 - [Konfigurasi env](#konfigurasi-env)
 - [Memori jangka panjang](#memori-jangka-panjang)
 - [Refactor mode](#refactor-mode)
+- [Mode otonom](#mode-otonom)
 - [Tes](#tes)
 - [Masalah umum](#masalah-umum)
 - [Lisensi](#lisensi)
@@ -227,6 +228,15 @@ Proxy tidak membuka chat DeepSeek baru setiap request.
   biasa, lebih agresif saat overflow atau chat reasoning-only.
 - Balasan yang hanya menarasikan aksi ("Saya akan cek...") tanpa tool call
   didorong sekali dengan instruksi bertindak, bukan bercerita.
+- Balasan yang hanya berisi rencana bernomor didorong untuk menjalankan langkah
+  pertama. Balasan seperti "Mau saya lanjut?" atau "Saya lanjutkan ya?" dianggap
+  jeda izin, bukan blocker.
+- Pertanyaan izin hanya didorong kalau klien meminta otonomi penuh. Tanpa itu,
+  model tetap boleh bertanya sebelum bertindak.
+- Tool yang sama dipanggil tiga kali dengan argumen identik dianggap loop;
+  model diminta ganti pendekatan atau laporkan blocker.
+- Saat blok guard dimatikan (mode refactor), semua dorongan inisiatif ikut mati
+  supaya jawaban berupa source code tidak diganggu.
 - Chat baru dimulai saat sesi hilang, rantai menyentuh `DEEPSEEK_MAX_MESSAGE_DEPTH`,
   chat lebih tua dari `DEEPSEEK_SESSION_TTL_MS`, DeepSeek bilang prompt terlalu
   panjang, atau kamu memanggil `/reset-session`.
@@ -286,7 +296,7 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 | Diagnosa | `npm run doctor` |
 | Tes unit | `node --test tests/unit.test.js` — 125 pass, 0 fail |
 | Tes inisiatif | `node --test tests/initiative.test.js` — 7 pass, 0 fail |
-| Tes penuh | `npm test` — 330 pass, 14 fail (baseline) |
+| Tes penuh | `npm test` — 331 pass, 13 fail (baseline) |
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
 menjalankan proses kedua.
@@ -656,11 +666,43 @@ Detail dan bukti log: [local-stack/REFACTOR-MODE.md](local-stack/REFACTOR-MODE.m
 
 ---
 
+## Mode otonom
+
+Proxy bisa mendorong model menyelesaikan tugas tanpa berhenti di rencana atau
+menunggu izin. Ini **opt-in**, karena banyak klien justru mengharapkan model
+bertanya lebih dulu.
+
+| Di mana | Nilai |
+|---|---|
+| Body JSON | `"agent_autonomy": true` |
+| Header HTTP | `x-agent-autonomy: full` (menang atas body) |
+
+Nilai on yang diterima: `full`, `on`, `1`, `true`, `yes`. Default off.
+
+Yang didorong saat aktif:
+
+| Sinyal | Aksi |
+|---|---|
+| Rencana bernomor tanpa eksekusi | Jalankan langkah pertama |
+| Pertanyaan izin ("mau saya...?") | Lanjutkan, jangan tanya |
+| Tool sama 3x argumen identik | Ganti pendekatan atau lapor blocker |
+
+Yang **tidak** didorong: pertanyaan yang menyebut kredensial, pilihan akun, atau
+aksi ireversibel. Itu blocker nyata dan model tetap boleh bertanya.
+
+Mode ini mati otomatis saat `guard_blocks: false` (refactor mode), karena
+jawaban refactor berupa source code dan dorongan bertindak akan mengganggunya.
+
+Sama seperti guard blocks: **9router membuang header klien**, jadi lewat 9router
+pakai field body `"agent_autonomy": true`.
+
+---
+
 ## Tes
 
 ```powershell
 node --test tests/unit.test.js     # 125 pass, 0 fail
-npm test                           # 330 pass, 14 fail
+npm test                           # 331 pass, 13 fail
 node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
 node --test tests/initiative.test.js                               # 7 pass, 0 fail
 ```
