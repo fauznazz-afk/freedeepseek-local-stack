@@ -366,9 +366,11 @@ const INSTANT_EMPTY_MS = 1500;
 // usually means the model exhausted its thinking budget on a huge prompt, so
 // those retries must actually shrink (a 0.5x of a 619k prompt is still huge).
 function emptyRetryRatio(retryAttempt, { overflow = false, sickSession = false } = {}) {
-    if (overflow) return Math.max(0.15, 0.45 - retryAttempt * 0.15);
+    if (overflow) return Math.max(0.15, Math.round((0.45 - retryAttempt * 0.15) * 100) / 100);
     if (sickSession) return Math.max(0.2, 0.4 - retryAttempt * 0.2);
-    return Math.max(0.5, 1 - retryAttempt * 0.2);
+    // The plain empty path used to keep 0.8x then 0.6x of a huge prompt, so the
+    // retry re-sent nearly the same thing. Shrink it the same way the other paths do.
+    return Math.max(0.3, Math.round((0.6 - retryAttempt * 0.15) * 100) / 100);
 }
 const AUTO_COMPACT_RATIO = 0.90; // compact when prompt exceeds 85% of max
 // Share of the upstream prompt cap a replayed recovery history may claim. The

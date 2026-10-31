@@ -1065,10 +1065,12 @@ test('client-provided multi-turn history suppresses server recovery-history inje
 
 test('empty-response retry shrinks the prompt, most aggressively for reasoning-only chats', () => {
   const ratio = serverInternals.emptyRetryRatio;
-  // Normal empty reply: keep most of the prompt (a hiccup, not a size problem).
-  assert.equal(ratio(0), 1);
-  assert.equal(ratio(1), 0.8);
-  assert.equal(ratio(5), 0.5, 'clamped at 0.5x');
+  // Plain empty reply: resending 0.8x of the same huge prompt is what stalled
+  // the retry loop, so even the first retry now cuts to 0.6x.
+  assert.equal(ratio(0), 0.6);
+  assert.equal(ratio(1), 0.45);
+  assert.equal(ratio(2), 0.3);
+  assert.equal(ratio(9), 0.3, 'clamped at 0.3x');
   // Reasoning-only streak: the model burned its budget on a huge prompt, so the
   // retry needs to shrink hard (a 0.5x of a 619k prompt is still 619k/2).
   assert.equal(ratio(0, { sickSession: true }), 0.4);
