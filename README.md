@@ -75,17 +75,28 @@ mematikan pencarian.
 
 ### Langkah
 
-Dari root repo:
+Dari root repo, satu perintah memasang semuanya:
 
 ```powershell
-npm run setup     # cek Node, buat settings.local.ps1, pasang shim deepseek-local
+powershell -ExecutionPolicy Bypass -File install.ps1
 npm run auth      # login DeepSeek di jendela Chrome yang terbuka
 deepseek-local start
 deepseek-local verify   # harus berakhir CHAIN_OK
 ```
 
-`npm run setup` idempoten: file yang sudah ada tidak ditimpa. 9router hanya
-peringatan kalau tidak ada — proxy tetap jalan tanpa 9router.
+`install.ps1` memeriksa Node 18+, membuat `settings.local.ps1` dari contoh,
+memasang perintah `deepseek-local`, lalu memasang 9router global kalau belum ada.
+Idempoten: yang sudah ada tidak ditimpa. Login DeepSeek sengaja tidak diotomatiskan
+karena butuh manusia di browser.
+
+| Flag | Efek |
+|---|---|
+| `-Check` | Laporan keadaan saja, tidak memasang apa pun |
+| `-SkipRouter` | Proxy saja, tanpa 9router |
+| `-SkipShim` | Tidak menulis `deepseek-local.cmd` atau mengubah PATH |
+
+`npm run setup` adalah versi lama yang setara (tanpa langkah 9router). Kalau
+9router tidak ada, itu hanya peringatan — proxy tetap jalan tanpanya.
 
 Setelah `npm run auth`, login di `chat.deepseek.com` di jendela Chrome yang
 terbuka, kirim satu pesan singkat seperti `ok`, lalu kembali ke terminal dan
