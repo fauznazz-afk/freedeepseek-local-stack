@@ -138,6 +138,10 @@ Proxy tidak membuka chat DeepSeek baru setiap request.
 - System prompt dan daftar tool dikirim ke upstream **sekali**. Giliran
   berikutnya hanya mengirim turn user/tool baru.
 - Balasan kosong, tool-call rusak, atau timeout **mempertahankan** chat hidup.
+- Retry balasan kosong mengecilkan prompt: `0.6x → 0.45x → 0.3x` untuk kasus
+  biasa, lebih agresif saat overflow atau chat reasoning-only.
+- Balasan yang hanya menarasikan aksi ("Saya akan cek...") tanpa tool call
+  didorong sekali dengan instruksi bertindak, bukan bercerita.
 - Chat baru dimulai saat sesi hilang, rantai menyentuh `DEEPSEEK_MAX_MESSAGE_DEPTH`,
   chat lebih tua dari `DEEPSEEK_SESSION_TTL_MS`, DeepSeek bilang prompt terlalu
   panjang, atau kamu memanggil `/reset-session`.
@@ -151,6 +155,9 @@ bukan potong gunting-buta:
 - 35% turn terbaru verbatim.
 - Turn tengah diringkas, anchor tetap: path file, perintah shell, URL, baris
   error.
+- Kalimat keputusan ("pakai X karena Y", "jangan ubah Z") masuk blok
+  `[decisions]`, terpisah dari anchor. Perintah shell dan tool-call JSON ditolak
+  agar yang tersimpan hanya prosa, bukan mesin.
 - Setiap prompt yang dipadatkan membawa `COMPACTION_NOTICE` yang melarang model
   mengarang detail yang hilang.
 - Riwayat yang diputar ulang dilabeli `[Recovered record of this conversation...]`
@@ -164,8 +171,16 @@ format log tidak lazim bisa lolos tanpa anchor.
 
 Kalau kompaksi membuang satu turn, path, perintah, dan error di dalamnya
 disimpan ke `session.memory` (cap `DEEPSEEK_MAX_MEMORY_CHARS`, default 16000,
-persist di `data/sessions.json`). Ledger ini diputar ulang di kepala prefix
-recovery pada reset/rebuild berikutnya.
+persist di `data/sessions.json`). Kalimat keputusan disimpan terpisah di
+`session.decisions` (cap 4000 karakter, maks 100 baris) dan dirender sebagai
+blok `[decisions]` di bawah header memori. Ledger ini diputar ulang di kepala
+prefix recovery pada reset/rebuild berikutnya.
+
+`extractDecisions()` butuh dua syarat: baris memuat pemicu keputusan (Inggris
+atau Indonesia) **dan** bukan baris mesin. Baris yang diawali `arguments:`,
+memuat `{"command"`, path absolut, atau kata kerja shell (`node`, `npm`, `git`)
+ditolak. Tanpa filter itu, 189 anchor nyata menghasilkan 3 "keputusan" palsu:
+dua tool-call JSON dan satu potongan tengah kata.
 
 Dengan `DEEPSEEK_SHARED_MEMORY_CHARS > 0`, anchor yang sama juga masuk ke
 `data/shared-memory.json`. Agent key yang benar-benar baru mewarisinya lewat
@@ -184,8 +199,8 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 | Cek rantai | `deepseek-local verify` — harus `CHAIN_OK` |
 | Login ulang DeepSeek | `npm run auth` |
 | Diagnosa | `npm run doctor` |
-| Tes unit | `node --test tests/unit.test.js` |
-| Tes penuh | `npm test` |
+| Tes unit | `node --test tests/unit.test.js` — 125 pass, 0 fail |
+| Tes penuh | `npm test` — 324 pass, 13 fail (baseline) |
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
 menjalankan proses kedua.
@@ -201,7 +216,7 @@ tidak lagi `Listen` (socket `TIME_WAIT` masih menjawab probe dan dulu membuat
 ```
 <repo root>/
 ├── server.js            # proxy (port 9655)
-├── lib/                 # pow, updater, context compaction
+├── lib/                 # pow, updater, context compaction, classify (error upstream)
 ├── public/, docs/, tests/, integrations/
 ├── scripts/
 │   ├── start.js         # launcher: npm start
@@ -427,6 +442,9 @@ ID lama tidak terdaftar dan mengembalikan `400 invalid_model`:
 | `GET` | `/readyz` | `200` hanya kalau ada login yang bisa melayani |
 | `GET` | `/dashboard` | Dashboard akun (halaman statis) |
 | `GET` | `/admin/accounts` | Pool dan status per login |
+| `GET` | `/admin/requests` | Log request (filter status/api/agent, paging) |
+| `GET` | `/admin/usage` | Ringkasan token dan biaya |
+| `GET` | `/admin/agents` | Ringkasan sesi agent |
 | `POST` | `/admin/accounts/<id>/{disable,enable,clear-cooldown}` | Pause, resume, un-cool |
 | `POST` | `/admin/accounts/reload` | Baca ulang file auth tanpa restart |
 | `GET` | `/v1/models` | Empat ID DeepSeek-V4.1-Flash |
@@ -437,6 +455,8 @@ ID lama tidak terdaftar dan mengembalikan `400 invalid_model`:
 | `GET` | `/v1/sessions` | Sesi agent lokal |
 | `POST` | `/reset-session?agent=<id>` | Buang satu chat Web |
 | `POST` | `/reset-session?agent=all` | Buang semua chat Web |
+
+Setiap request mengembalikan header `x-request-id`. Nilai diambil dari header klien kalau ada (maks 64 karakter), atau dibuat UUID. ID yang sama tercatat di `requestLog` (`/admin/requests`) dan di tag log agent.
 
 Contoh cepat:
 
@@ -553,8 +573,9 @@ Detail dan bukti log: [local-stack/REFACTOR-MODE.md](local-stack/REFACTOR-MODE.m
 ## Tes
 
 ```powershell
-node --test tests/unit.test.js     # 123 pass, 0 fail
-npm test                           # 312 pass, 13 fail
+node --test tests/unit.test.js     # 125 pass, 0 fail
+npm test                           # 324 pass, 13 fail
+node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
 ```
 
 13 kegagalan `npm test` sudah ada sejak baseline upstream — butuh Chrome, macOS,
