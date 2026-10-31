@@ -280,7 +280,27 @@ Copy-Item local-stack\settings.local.example.ps1 local-stack\settings.local.ps1
 Kalau file itu rusak, `start.ps1` hanya memberi peringatan lalu lanjut dengan
 default — stack tidak ikut mati gara-gara satu baris salah.
 
-Nilai yang dipakai di mesin ini:
+**Clone baru tidak punya `settings.local.ps1`** (file itu git-ignored). `npm run
+setup` menyalin contohnya, dan isi contoh itu adalah nilai di bawah. Jadi clone
+baru langsung dapat tuning ini tanpa mengedit apa pun; kalau kamu ingin nilai
+bawaan kode (`server.js`), hapus file itu. Nilai bawaan kode ada di
+[tabel env](#konfigurasi-env).
+
+Untuk host yang dipakai banyak orang sekaligus, jangan pakai nilai di bawah.
+Salin `settings.shared.example.ps1` sebagai gantinya:
+
+```powershell
+Copy-Item local-stack\settings.shared.example.ps1 local-stack\settings.local.ps1
+deepseek-local restart
+```
+
+Bedanya: TTL 12 jam (bukan 7 hari), 150 pesan per chat, replay 200k, plafon
+prompt 200k, cooldown akun kembali 10 menit, dan ledger proyek bersama dimatikan.
+Batas kerasnya bukan CPU/RAM: **satu login DeepSeek melayani satu chat in-flight**.
+Sepuluh pengguna butuh sepuluh login, atau mereka mengantre. Hitung login dulu,
+baru tuning.
+
+Nilai yang dipakai di mesin ini (dan di `settings.local.example.ps1`):
 
 | Variabel | Nilai | Arti |
 |---|---|---|

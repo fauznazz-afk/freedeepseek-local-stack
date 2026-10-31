@@ -6,6 +6,9 @@
 #
 # Check what actually took effect:  deepseek-local status
 # or:                               curl http://127.0.0.1:9655/health
+#
+# This example is the SINGLE-USER baseline. A shared host should start from
+# settings.shared.example.ps1 instead: its values are lower on purpose.
 
 # --- Session lifetime -------------------------------------------------------
 # A "session" here is the remote DeepSeek chat. When it expires the proxy opens
@@ -22,20 +25,21 @@ $env:DEEPSEEK_MAX_MESSAGE_DEPTH = "400"
 # with MAX_MESSAGE_DEPTH: raising depth alone still replays only 100 entries.
 # Defaults are 100 messages / 400000 chars.
 #
-# Kept at 800000 = the upstream prompt cap below. A larger budget buys nothing:
+# Kept equal to the upstream prompt cap below. A larger budget buys nothing:
 # the prompt is capped anyway, so the excess would only be condensed away by
 # lib/context.js before sending.
 $env:DEEPSEEK_MAX_HISTORY_MESSAGES = "400"
-$env:DEEPSEEK_MAX_HISTORY_CHARS = "800000"
+$env:DEEPSEEK_MAX_HISTORY_CHARS = "480000"
 
 # Idle sessions are kept on disk 2x the TTL by default; that follows the TTL
 # above, so it is left unset.
 # $env:DEEPSEEK_SESSION_IDLE_EVICT_MS = "1209600000"
 
 # Upstream prompt cap in characters (default 800000 ~= 200k tokens). Anything
-# past this is condensed by lib/context.js, not dropped, so leaving it alone is
-# usually right - raising it makes each request heavier.
-# $env:DEEPSEEK_MAX_PROMPT_CHARS = "800000"
+# past this is condensed by lib/context.js, not dropped. DeepSeek Web bounces
+# compaction results above ~500-760k chars with a 0-char reply, so 480000
+# (~128k tokens) is the practical ceiling of the web lane.
+$env:DEEPSEEK_MAX_PROMPT_CHARS = "480000"
 
 # Per-request deadline (default 120s). DeepSeek thinking runs routinely past
 # 120s before emitting any content; 300s lets long reasoning finish.

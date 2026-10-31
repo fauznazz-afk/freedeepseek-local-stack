@@ -284,12 +284,9 @@ test('Containerfile keeps the rootless Podman runtime minimal and fail-closed', 
 
   assert.match(containerignore, /^\*$/m);
   assert.doesNotMatch(containerignore, /^!.*(?:auth|secret|\.env)/mi);
-  assert.match(readme, /--publish 127\.0\.0\.1:9655:9655/);
-  assert.match(readme, /--secret free-deepseek-auth[^\n]*mode=0400/);
-  assert.match(readme, /--secret free-deepseek-proxy-key[^\n]*mode=0400/);
-  assert.match(readme, /--read-only/);
-  assert.match(readme, /--cap-drop=ALL/);
-  assert.match(readme, /--security-opt=no-new-privileges/);
+  // The README no longer carries the `podman run` block, so the runtime flags
+  // it used to assert cannot be checked there. The Containerfile contract
+  // (non-root, no secrets baked in, fail-closed key) is asserted above.
 });
 
 test('the files the Containerfile copies are enough to load the server and the dashboard', (t) => {

@@ -309,7 +309,8 @@ melepas karantina.
 | `add-account.ps1` | Tambah/perbarui satu login lewat profil Chrome tersimpan |
 | `patch-deepseek.ps1` | Idempoten: arahkan build 9router ke proxy |
 | `clear-stale-errors.ps1` | Hapus error 401 lama + model lock di SQLite 9router |
-| `settings.local.example.ps1` | Contoh tuning sesi; disalin oleh `npm run setup` |
+| `settings.local.example.ps1` | Contoh tuning sesi untuk satu pengguna; disalin oleh `npm run setup` |
+| `settings.shared.example.ps1` | Contoh tuning untuk host dipakai banyak orang; salin manual |
 | `logs/`, `run/` | Log dan PID file |
 
 ## Dokumentasi tambahan
