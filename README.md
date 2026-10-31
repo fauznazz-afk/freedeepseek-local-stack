@@ -47,6 +47,13 @@ mematikan pencarian.
 ## Isi
 
 - [Pasang](#pasang)
+  - [Prasyarat](#prasyarat)
+  - [Langkah](#langkah)
+  - [Login DeepSeek](#login-deepseek)
+  - [Tanpa shim](#tanpa-shim)
+  - [Proxy saja](#proxy-saja-tanpa-9router)
+  - [Akun kedua](#akun-kedua-dan-seterusnya)
+  - [Upgrade](#upgrade-dari-clone-lama)
 - [Cara kerja](#cara-kerja)
 - [Perintah harian](#perintah-harian)
 - [Struktur repo](#struktur-repo)
@@ -67,11 +74,26 @@ mematikan pencarian.
 
 ### Prasyarat
 
-- Windows + PowerShell 5.1 (atau `pwsh` 7)
-- Node.js 18+
-- Chrome (untuk login DeepSeek)
-- `9router` terpasang global — **opsional**, hanya untuk rantai penuh:
-  `npm i -g 9router`
+| Kebutuhan | Wajib? | Catatan |
+|---|---|---|
+| Windows 10/11 + PowerShell 5.1 (atau `pwsh` 7) | wajib | Launcher `local-stack/` memakai PowerShell |
+| Node.js 18+ | wajib | `node --version` harus >= 18. Ambil LTS dari nodejs.org |
+| npm | wajib | Ikut Node.js |
+| Chrome | wajib untuk login | Jendela login DeepSeek memakai Chrome for Testing |
+| Akun DeepSeek | wajib | Satu cukup; 2-3 akun membuat rotasi saat rate limit |
+| `9router` | opsional | Hanya untuk rantai penuh. `install.ps1` memasangnya otomatis |
+
+Pastikan PowerShell boleh menjalankan script. Cek sekali:
+
+```powershell
+Get-ExecutionPolicy -List
+```
+
+Kalau `CurrentUser` masih `Restricted`, izinkan dulu:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
 
 ### Langkah
 
@@ -84,25 +106,48 @@ deepseek-local start
 deepseek-local verify   # harus berakhir CHAIN_OK
 ```
 
-`install.ps1` memeriksa Node 18+, membuat `settings.local.ps1` dari contoh,
-memasang perintah `deepseek-local`, lalu memasang 9router global kalau belum ada.
-Idempoten: yang sudah ada tidak ditimpa. Login DeepSeek sengaja tidak diotomatiskan
-karena butuh manusia di browser.
+Yang dikerjakan `install.ps1`, berurutan:
+
+1. Cek Node 18+ dan npm. Kalau tidak memenuhi, installer berhenti dengan pesan jelas.
+2. Salin `local-stack/settings.local.example.ps1` ke `settings.local.ps1`.
+3. Pasang perintah `deepseek-local` dan tambahkan `~/.local/bin` ke PATH user.
+4. Pasang `9router` global kalau tidak ada build lokal maupun global.
+5. Cetak tiga langkah lanjutan di atas.
+
+Sifat yang dijaga:
+
+- **Idempoten.** Jalankan ulang kapan saja. File yang sudah ada tidak ditimpa.
+- **Fail-closed.** Langkah yang gagal ditandai `[FAIL]` dengan sebabnya, lalu exit 1.
+- **Login manual.** Login DeepSeek tidak diotomatiskan karena butuh manusia di browser.
 
 | Flag | Efek |
 |---|---|
-| `-Check` | Laporan keadaan saja, tidak memasang apa pun |
-| `-SkipRouter` | Proxy saja, tanpa 9router |
-| `-SkipShim` | Tidak menulis `deepseek-local.cmd` atau mengubah PATH |
+| `-Check` | Laporan keadaan saja, tidak memasang apa pun. Berguna saat diagnosa |
+| `-SkipRouter` | Proxy saja, tanpa 9router. `deepseek-local` tetap jalan |
+| `-SkipShim` | Tidak menulis `deepseek-local.cmd` dan tidak mengubah PATH |
 
-`npm run setup` adalah versi lama yang setara (tanpa langkah 9router). Kalau
-9router tidak ada, itu hanya peringatan — proxy tetap jalan tanpanya.
+Pintasan setara: `npm run install`. Versi lama `npm run setup` tetap ada tetapi
+hanya langkah 1-3 (tanpa 9router).
 
-Setelah `npm run auth`, login di `chat.deepseek.com` di jendela Chrome yang
-terbuka, kirim satu pesan singkat seperti `ok`, lalu kembali ke terminal dan
-lanjutkan. File tersimpan sebagai `deepseek-auth.json` (mode `0600`, git-ignored).
+### Login DeepSeek
+
+Setelah `npm run auth`, jendela Chrome terbuka di `chat.deepseek.com`:
+
+1. Login dengan akun DeepSeek.
+2. Kirim satu pesan singkat, misalnya `ok`, supaya sesi chat aktif.
+3. Kembali ke terminal dan tekan Enter.
+
+Hasilnya `deepseek-auth.json` (mode `0600`, git-ignored). Jangan pernah commit file itu.
+
+Perbarui token tanpa login ulang (profil Chrome masih tersimpan):
+
+```powershell
+npm run auth
+```
 
 ### Tanpa shim
+
+Kalau `-SkipShim` dipakai, atau PATH belum dimuat di terminal lama, panggil langsung:
 
 ```bat
 local-stack\Start-All.bat     :: nyalakan semua
@@ -110,16 +155,45 @@ local-stack\Verify-All.bat    :: cek rantai penuh
 local-stack\Stop-All.bat      :: matikan semua
 ```
 
+Atau lewat PowerShell, tanpa PATH:
+
+```powershell
+powershell -File local-stack\deepseek-local.ps1 start
+```
+
 ### Proxy saja (tanpa 9router)
 
 ```powershell
-npm run setup
+powershell -ExecutionPolicy Bypass -File install.ps1 -SkipRouter
 npm run auth
 npm start
 ```
 
 Endpoint: `http://127.0.0.1:9655/v1` plus dashboard di
-`http://127.0.0.1:9655/dashboard`.
+`http://127.0.0.1:9655/dashboard`. Tanpa 9router, arahkan klien langsung ke
+port 9655, bukan 20128.
+
+### Akun kedua dan seterusnya
+
+Rotasi akun bekerja tanpa kode tambahan. Tambah login dengan:
+
+```powershell
+powershell -File local-stack\add-account.ps1 -Name akun2
+```
+
+File tersimpan di `accounts/akun2.json` dan otomatis dimuat saat start. Akun harus
+benar-benar berbeda email. Detail profil Chrome per akun:
+[local-stack/README.md](local-stack/README.md).
+
+### Upgrade dari clone lama
+
+```powershell
+git pull --ff-only
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+Installer tidak menyentuh `settings.local.ps1`, `deepseek-auth.json`, atau isi
+`data/`, jadi tuning dan sesi yang ada tetap.
 
 ---
 
