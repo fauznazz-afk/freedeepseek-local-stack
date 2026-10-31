@@ -1557,10 +1557,10 @@ function adaptHarnessWebAccess(text) {
     return next;
 }
 
-const OPENCODE_AUTONOMY_INSTRUCTION = 'IMPORTANT: Token cost does not matter on this connection. Finish the user\'s task autonomously: inspect the repo, make the changes, run the relevant checks, and keep going until the work is done or a real blocker (missing credential, destructive action, or a choice only the user can make). Do not ask clarifying questions, do not stop at a plan or a first step, and do not wait for permission. Finish every unblocked part first.';
+const OPENCODE_AUTONOMY_INSTRUCTION = 'IMPORTANT: Token cost does not matter on this connection. Finish the user\'s task autonomously: inspect the repo, make the changes, run the relevant checks, and keep going until the work is done or a real blocker (missing credential, destructive action, or a choice only the user can make). Do not ask clarifying questions, do not stop at a plan or a first step, and do not wait for permission. Finish every unblocked part first. When the next step is obvious, act on it; verify changes by running them, and report back with evidence rather than promises.';
 
 const OPENCODE_PROACTIVENESS = `# Proactiveness
-When the user asks you to do something, complete the whole task. Do not pause to ask how, whether, or what next. Use tools, inspect the repo, and pick reasonable defaults. Do not ask the user questions that files or commands can answer. Do not hand back a partial result with follow-up questions.`;
+When the user asks you to do something, complete the whole task. Do not pause to ask how, whether, or what next. Use tools, inspect the repo, and pick reasonable defaults. Do not ask the user questions that files or commands can answer. Do not hand back a partial result with follow-up questions. Work to a verified end state: make the change, run it, and read the actual result before claiming success. If a result is wrong, fix it and re-run rather than reporting the failure. Once the task is done and verified, take the obvious follow-on step that serves the stated goal.`;
 
 function isOpenCodeSystemPrompt(text) {
     return /^You are opencode\b/im.test(String(text || ''));
@@ -5050,10 +5050,16 @@ const server = http.createServer(async (req, res) => {
             // A changed conversation fingerprint means the client switched to a
             // different chat (e.g. resumed old history in OpenCode). The sticky
             // remote chat and the local recovery history belong to the previous
-            // chat, so both are dropped; the client's own transcript rebuilds context.
+            // chat, so both are dropped; the client's own transcript rebuilds
+            // context. Before the recovery history disappears, bank its anchors
+            // into the session/shared ledgers - those facts outlive the chat.
             const convoKey = conversationFingerprint(messages);
             if (convoKey && session.conversationKey && session.conversationKey !== convoKey) {
                 const dropped = resetRemoteSession(session);
+                if (Array.isArray(session.history) && session.history.length) {
+                    const lost = harvestSessionMemory(session, session.history.map(e => `${e.user || ''}\n${e.assistant || ''}`).join('\n'));
+                    if (lost) console.log(`${agentTag} Session memory +${lost} anchor(s) banked from ${session.history.length} dropped turn(s).`);
+                }
                 session.history = [];
                 console.log(`${agentTag} Client switched conversation; reset remote chat ${dropped.failedSessionId || '(none)'} and ${dropped.failedMessageCount || 0} message(s) of history.`);
             }
@@ -5069,13 +5075,21 @@ const server = http.createServer(async (req, res) => {
             // Keep a recovery prompt available even while the upstream session
             // is healthy. If that remote chat expires mid-request, its opaque
             // state disappears and the replacement must receive local history.
-            // Banked session memory rides the recovery prefix: it is replayed
-            // when a remote chat is rebuilt, which is exactly when compaction
-            // history matters most. Sticky continuations skip it (the live chat
-            // already holds those turns).
-            const recoveryHistoryPrefix = hasExplicitConversationHistory(messages)
+            // Banked memory rides on every rebuilt remote chat regardless of
+            // how the client sends context: a resumed chat ships its full
+            // transcript (explicit history) and the sticky live chat already
+            // holds those turns, but in BOTH cases the compact fact ledger is
+            // the only durable recall the proxy has - drop it and a resumed
+            // chat starts amnesiac.
+            const memoryPrefix = recoveryMemoryPrefix(session);
+            const remoteLiveBeforePrompt = Boolean(session.id);
+            const recoveryHistoryPrefix = memoryPrefix + (hasExplicitConversationHistory(messages)
                 ? ''
-                : recoveryMemoryPrefix(session) + buildRecoveryHistoryPrefix(session.history);
+                : buildRecoveryHistoryPrefix(session.history));
+            if (memoryPrefix && !remoteLiveBeforePrompt) {
+                // Log the rider so memory use stays observable in the proxy log.
+                console.log(`${agentTag} Session memory riding prompt (${session.memory ? session.memory.length : 0} line(s)).`);
+            }
             const resolved = resolveUpstreamPrompt(session, messages, tools, recoveryHistoryPrefix, promptOptions);
             const historyPrefix = resolved.historyPrefix;
 

@@ -1236,6 +1236,8 @@ test('OpenCode system prompt keeps the agent role and replaces token-economy wit
   assert.match(adapted, /Finish the user's task autonomously/);
   assert.match(adapted, /Do not ask clarifying questions/);
   assert.match(adapted, /complete the whole task/);
+  assert.match(adapted, /verified end state/);
+  assert.match(adapted, /act on it/);
   assert.match(adapted, /search the repo/);
   assert.doesNotMatch(adapted, /minimize output tokens/i);
   assert.doesNotMatch(adapted, /fewer than 4 lines/i);
