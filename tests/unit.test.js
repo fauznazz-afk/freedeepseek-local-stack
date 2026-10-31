@@ -265,10 +265,11 @@ test('Containerfile keeps the rootless Podman runtime minimal and fail-closed', 
 
   assert.deepEqual(copyLines, [
     'COPY --chown=1000:1000 package.json server.js ./',
-    // server.js requires lib/updater.js (updates), lib/context.js (compaction) and
-    // lib/cooldowns.js (cooldown state that survives a restart); the image still
-    // has no .git, so it reports updates as unavailable.
-    'COPY --chown=1000:1000 lib/pow.js lib/updater.js lib/context.js lib/cooldowns.js ./lib/',
+    // server.js requires lib/updater.js (updates), lib/context.js (compaction),
+    // lib/cooldowns.js (cooldown state that survives a restart) and
+    // lib/classify.js (upstream failure classification); the image still has no
+    // .git, so it reports updates as unavailable.
+    'COPY --chown=1000:1000 lib/pow.js lib/updater.js lib/context.js lib/cooldowns.js lib/classify.js ./lib/',
     'COPY --chown=1000:1000 scripts/lib/tui-menu.js ./scripts/lib/tui-menu.js',
     'COPY --chown=1000:1000 public/dashboard/index.html public/dashboard/*.css public/dashboard/*.js public/dashboard/*.png public/dashboard/*.jpg public/dashboard/*.woff2 public/dashboard/GEIST-LICENSE.txt ./public/dashboard/',
   ]);

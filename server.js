@@ -340,9 +340,7 @@ const DEFAULT_ACCOUNT_COOLDOWN_MS = envNumber('DEEPSEEK_ACCOUNT_COOLDOWN_MS', 10
 // stops burning a PoW solve on a dead credential every request. A re-login writes
 // a new credential fingerprint, which drops the persisted quarantine.
 const DEFAULT_AUTH_EXPIRED_COOLDOWN_MS = envNumber('DEEPSEEK_AUTH_EXPIRED_COOLDOWN_MS', 30 * 60 * 1000);
-const AUTH_EXPIRED_PATTERN = /authorization failed|invalid token|4000[123]/i;
-// A WAF/PoW 401 is transient and must not count toward the quarantine ladder.
-const TRANSIENT_AUTH_PATTERN = /pow|challenge|waf/i;
+// Auth patterns moved to lib/classify.js (isAuthSignal / isTransientAuthSignal).
 let DS_CONFIG = {};
 let dsHeaders = {};
 const accounts = [];
@@ -880,7 +878,7 @@ function markAccountFailure(account, status, reason = '', retryAfterRaw = null, 
         // Only a confirmed dead credential builds the quarantine ladder. A WAF/PoW
         // 401 is transient; accumulating it would quarantine healthy logins.
         const detailText = String(detail || '');
-        if (code === 401 && !TRANSIENT_AUTH_PATTERN.test(detailText) && AUTH_EXPIRED_PATTERN.test(detailText)) {
+        if (code === 401 && !isTransientAuthSignal(detailText) && isAuthSignal(detailText)) {
             account.authStrikes = (account.authStrikes || 0) + 1;
         } else {
             account.authStrikes = 0;
@@ -1118,43 +1116,38 @@ function isDeepSeekModelErrorEvent(event) {
     return event && event.type === 'error';
 }
 
-// DeepSeek Web throttles a login with localized text ("Слишком частые сообщения",
-// "Too many requests", "请求过于频繁") in an HTTP 400/429 or JSON body, or with an
-// in-stream `event: hint` whose finish_reason is rate_limit_reached.
-// "rate limit" must not start inside a word ("generate limit", "moderate limit").
-const RATE_LIMIT_PATTERN = /(?<![a-z])rate[\s_-]*limit|too\s+many\s+requests|too\s+frequent|слишком\s+част|частые\s+(?:сообщения|запросы)|频繁|请求过多|请求次数过多/i;
-function isRateLimitSignal(signal) {
-    if (!signal) return false;
-    if (typeof signal === 'string') return RATE_LIMIT_PATTERN.test(signal);
-    if (typeof signal !== 'object') return false;
-    if (/rate_?limit/i.test(String(signal.finish_reason || ''))) return true;
-    const text = [signal.content, signal.message, signal.msg, signal.biz_msg, signal.finish_reason, signal.type, signal.detail]
-        .filter(value => typeof value === 'string' && value)
-        .join(' ');
-    return Boolean(text) && RATE_LIMIT_PATTERN.test(text);
-}
+// Failure classification lives in lib/classify.js: patterns in one table, so a
+// wording change on DeepSeek's side is one edit instead of a hunt through
+// half a dozen call sites.
+const {
+    isRateLimitSignal,
+    isContextTooLongSignal,
+    isAuthSignal,
+    isTransientAuthSignal,
+    classifyUpstreamFailure,
+} = require('./lib/classify');
 
 function createUpstreamHttpError(status, body = '', retryAfter = null) {
-    const detail = String(body || '').replace(/\s+/g, ' ').trim().substring(0, 300);
-    if (Number(status) === 429 || isRateLimitSignal(detail)) {
+    const verdict = classifyUpstreamFailure({ status, body });
+    const detail = verdict.detail;
+    if (verdict.kind === 'rate_limit') {
         const error = new Error(`DeepSeek rate limit (upstream HTTP ${Number(status) || 429})${detail ? `: ${detail}` : ''}`);
         error.status = 429;
         error.type = 'rate_limit_error';
         if (retryAfter) error.retryAfter = retryAfter;
         return error;
     }
-    if (isContextTooLongError(detail)) {
+    if (verdict.kind === 'overflow') {
         const error = new Error(detail || 'DeepSeek prompt is too long');
         error.status = 400;
         error.type = 'context_length_exceeded';
         if (retryAfter) error.retryAfter = retryAfter;
         return error;
     }
-    const code = Number(status) || 502;
-    const type = (code === 401 || code === 403) ? 'authentication_error' : 'upstream_http_error';
+    const code = verdict.status;
     const error = new Error(`DeepSeek upstream HTTP ${code}${detail ? `: ${detail}` : ''}`);
     error.status = code;
-    error.type = type;
+    error.type = verdict.type;
     if (retryAfter) error.retryAfter = retryAfter;
     return error;
 }
@@ -2008,6 +2001,7 @@ function formatToolReminder(tools, options = {}) {
         '--- TOOL REMINDER ---',
         'Web: answer in text. DeepSeek Search is already on. Do not use bash or curl for the web.',
         'This computer: output only {"tool_call":{"name":"<function_name>","arguments":{...}}} or {"tool_calls":[{"name":"<function_name>","arguments":{...}}]}. Do not paste source files or diffs. Do not call execute_code.',
+        'Exception: when the answer IS code (a refactor, a rewrite, a patch), output that code in plain text. A tool call is for acting, not for showing the result.',
         `Available tools: ${names.join(', ')}`,
         '--- END TOOL REMINDER ---',
     ].join('\n');
@@ -3522,12 +3516,7 @@ function isContinuationRecoverySafe(previousAccountId, continuationCall) {
 }
 
 function isContextTooLongError(error) {
-    // A throttled login is not an oversized prompt: never compact for it.
-    if (isRateLimitSignal(error)) return false;
-    const message = typeof error === 'string'
-        ? error
-        : `${error?.content || ''} ${error?.message || ''} ${error?.finish_reason || ''} ${error?.type || ''}`;
-    return /(?:content|prompt|context).{0,40}(?:too\s+long|too\s+large|length|limit|maximum)|maximum.{0,30}(?:context|token)|too\s+many\s+tokens|содержани[ея]\s+слишком\s+длин|контекст.{0,30}(?:длин|лимит)|内容.{0,12}(?:过长|太长)|上下文.{0,12}(?:过长|超出)/i.test(message);
+    return isContextTooLongSignal(error);
 }
 
 function normalizeRetryResponse(result) {
@@ -4721,6 +4710,11 @@ const server = http.createServer(async (req, res) => {
 
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
+    // One id for every line this request writes, and back to the caller, so a
+    // slow or failed request can be traced across proxy, 9router and client logs.
+    const requestId = String(req.headers['x-request-id'] || '').trim().slice(0, 64) || crypto.randomUUID();
+    res.setHeader('x-request-id', requestId);
+
     const isPublicProbe = req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/readyz' || isDashboardPath(url.pathname));
     if (!isPublicProbe && !isProxyAuthorized(req.headers.authorization)) {
         res.writeHead(401, {
@@ -4901,6 +4895,7 @@ const server = http.createServer(async (req, res) => {
         let activeAgentId = null;
         const lockHolder = { id: crypto.randomUUID(), agentId: null };
         const logRow = {
+            request_id: requestId,
             ts: requestStartedAt,
             ip: clientIp(req),
             path: url.pathname,
@@ -4947,7 +4942,7 @@ const server = http.createServer(async (req, res) => {
             const agentId = requestedSession
                 ? String(requestedSession)
                 : unkeyedAgentId(remoteAddr, req.headers['user-agent']);
-            const agentTag = `[${agentId}]`;
+            const agentTag = `[${agentId}${requestId ? ` req:${requestId.slice(0, 8)}` : ''}]`;
             if (!guardBlocksOn) {
                 console.log(`${agentTag} Guard blocks relaxed for this request (no NO-TOOLS CONTRACT / no "do not paste source" rule).`);
             }
@@ -5851,7 +5846,7 @@ const server = http.createServer(async (req, res) => {
             logRow.account = activeSession?.accountId || null;
             const headers = { 'Content-Type': 'application/json' };
             if (status === 429 && e.retryAfter) headers['Retry-After'] = String(e.retryAfter);
-            res.writeHead(status, headers);
+            res.writeHead(status, { ...headers, 'x-request-id': requestId });
             const failure = timedOut && activeSession
                 ? { failedSessionId: activeSession.id, failedMessageCount: activeSession.messageCount, accountId: activeSession.accountId }
                 : null;
