@@ -2074,8 +2074,36 @@ function compactToolSchema(value) {
     return compact;
 }
 
+// Built once per distinct tool set: an agent that opens many sessions sends the
+// same schema blob every time, and rebuilding it is pure CPU. The key is the
+// schema itself, so a changed tool set misses. Bounded so a long-lived proxy
+// cannot grow without limit.
+const toolDefinitionCache = new Map();
+const MAX_TOOL_DEFINITION_CACHE = 16;
+function toolDefinitionCacheKey(tools) {
+    try {
+        return crypto.createHash('sha1').update(JSON.stringify(tools)).digest('hex');
+    } catch (e) {
+        return null;
+    }
+}
 function formatToolDefinitions(tools) {
     if (!tools || tools.length === 0) return '';
+    const cacheKey = toolDefinitionCacheKey(tools);
+    if (cacheKey) {
+        const hit = toolDefinitionCache.get(cacheKey);
+        if (hit !== undefined) return hit;
+    }
+    const text = buildToolDefinitionsText(tools);
+    if (cacheKey) {
+        if (toolDefinitionCache.size >= MAX_TOOL_DEFINITION_CACHE) {
+            toolDefinitionCache.delete(toolDefinitionCache.keys().next().value);
+        }
+        toolDefinitionCache.set(cacheKey, text);
+    }
+    return text;
+}
+function buildToolDefinitionsText(tools) {
     const rawSchemaChars = tools.reduce((total, tool) => {
         try { return total + JSON.stringify(tool?.function?.parameters || {}).length; }
         catch (e) { return total; }
@@ -6259,6 +6287,8 @@ module.exports = {
         applyResponsePatchOperations,
         compactToolSchema,
         formatToolDefinitions,
+        buildToolDefinitionsText,
+        toolDefinitionCache,
         formatToolReminder,
         pinToolReminder,
         parseToolCall,
