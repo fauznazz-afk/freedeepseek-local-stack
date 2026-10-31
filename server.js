@@ -1639,6 +1639,81 @@ function emptyResponseNudge(searchEnabled) {
     const base = 'Your previous reply was empty. Output the next user-visible answer or exactly one gateway tool request as {"tool_call":{"name":"<function>","arguments":{...}}}. Do not call execute_code.';
     return searchEnabled ? `${base} DeepSeek native Web Search is already on; answer with it instead of calling web_search.` : base;
 }
+
+// A numbered plan is work announced, not work done. Narrow on purpose: a list
+// must look like steps (>=2 numbered lines, or an explicit "plan/rencana"), and
+// a reply that reports a finished result is never a plan.
+const PLAN_HEADER = /\b(?:rencana|plan|steps?|langkah)\b\s*:/i;
+const FINISHED_MARKER = /\b(?:selesai|beres|done|finished|completed|sudah (?:aku|saya) (?:ubah|perbaiki|jalankan|tes)|tests? (?:pass|lulus))\b/i;
+function looksLikeUnstartedPlan(text) {
+    const value = String(text || '').trim();
+    if (!value || value.length >= 1200) return false;
+    if (value.includes('{"tool_call"') || value.includes('tool_calls')) return false;
+    if (value.includes('```')) return false;
+    const lines = value.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const numbered = lines.filter(l => /^(?:\d+[.)]|[-*])\s+\S/.test(l)).length;
+    const hasHeader = PLAN_HEADER.test(value);
+    if (!hasHeader && numbered < 2) return false;
+    if (FINISHED_MARKER.test(value)) return false;
+    return true;
+}
+function planNudge() {
+    return '[STRICT INSTRUCTION] Your previous reply was a plan, not the work. Do not restate the plan. Execute the first step now: make exactly one gateway tool call as {"tool_call":{"name":"<function>","arguments":{...}}}, or give the final plain-text answer if the plan is already done.';
+}
+
+// A question that asks permission for work the agent could just do. Real
+// blockers are left alone: they name a choice only the user can make, or an
+// irreversible action. This is opt-in (x-agent-autonomy), never on by default,
+// because many clients expect the model to ask before it acts.
+const PERMISSION_QUESTION = /(?:\b(?:mau|ingin|perlu|boleh)\b[^?\n]{0,80}\?|\b(?:should|shall|may|do you want|would you like) i\b[^?\n]{0,80}\?)/i;
+const REAL_BLOCKER = /\b(?:kredensial|credential|password|token|akun mana|which account|api key|tidak bisa dibatalkan|irreversible|hapus semua|delete all|drop table)\b/i;
+function looksLikePermissionPause(text) {
+    const value = String(text || '').trim();
+    if (!value || value.length >= 1200) return false;
+    if (REAL_BLOCKER.test(value)) return false;
+    return PERMISSION_QUESTION.test(value);
+}
+function permissionPauseNudge() {
+    return '[STRICT INSTRUCTION] Do not ask for permission. The request already authorises this work. Continue now: make exactly one gateway tool call as {"tool_call":{"name":"<function>","arguments":{...}}}. Ask only if a missing credential or an irreversible action blocks you (a real blocker).';
+}
+
+// Same tool, same arguments, three times: the model is stuck, not working.
+function stableToolKey(name, args) {
+    const payload = typeof args === 'string' ? args : JSON.stringify(args || {});
+    return `${name}: ${String(payload || '').slice(0, 120)}`;
+}
+function detectRepeatedToolCall(calls) {
+    const list = (calls || []).filter(Boolean);
+    if (list.length < 3) return null;
+    const key = stableToolKey(list[0].name, list[0].args);
+    return list.every(call => stableToolKey(call.name, call.args) === key) ? key : null;
+}
+function toolLoopNudge(key) {
+    return `[STRICT INSTRUCTION] You already ran this exact call three times (${key}) and it did not move the task forward. Do not repeat it. Change approach with one different gateway tool call as {"tool_call":{"name":"<function>","arguments":{...}}}, or stop and report the blocker in plain text.`;
+}
+// History stores tool calls as prose (TOOL_CALL: name / arguments: {...}), and
+// some older entries carry the OpenAI tool_calls array. Accept both shapes.
+function recentToolCalls(session, limit = 12) {
+    const entries = (session?.history || []).slice(-limit);
+    const calls = [];
+    for (const entry of entries) {
+        const openAi = Array.isArray(entry?.tool_calls) ? entry.tool_calls : [];
+        for (const call of openAi) {
+            const name = call?.function?.name || call?.name;
+            if (!name) continue;
+            let args = call?.function?.arguments ?? call?.arguments ?? {};
+            if (typeof args === 'string') { try { args = JSON.parse(args); } catch { /* keep raw */ } }
+            calls.push({ name: String(name).trim(), args });
+        }
+        const text = String(entry?.assistant || '');
+        const match = /^TOOL_CALL:\s*(\S+)\s*\narguments:\s*([\s\S]*)$/m.exec(text);
+        if (!match) continue;
+        let args = match[2].trim();
+        try { args = JSON.parse(args); } catch { /* keep the raw string */ }
+        calls.push({ name: match[1].trim(), args });
+    }
+    return calls;
+}
 function nativeToolRepairPrompt(searchEnabled) {
     const gatewayTool = 'If you need the local filesystem, request exactly one gateway tool as {"tool_call":{"name":"<function>","arguments":{...}}}.';
     return searchEnabled
@@ -1691,6 +1766,22 @@ function resolveGuardBlocks(rawParams, headers = {}) {
         }
     }
     return guardBlocksEnabled();
+}
+
+// Opt-in only: telling the model to stop asking permission changes chat
+// behaviour, so the default stays off and the client must ask for it.
+function resolveAutonomy(rawParams, headers = {}) {
+    const headerValue = headers ? headers['x-agent-autonomy'] : undefined;
+    if (headerValue !== undefined && headerValue !== null && String(headerValue).trim() !== '') {
+        return ['full', 'on', '1', 'true', 'yes'].includes(String(headerValue).trim().toLowerCase());
+    }
+    if (rawParams && rawParams.agent_autonomy !== undefined) {
+        const raw = rawParams.agent_autonomy;
+        if (raw === true) return true;
+        if (raw === false) return false;
+        if (typeof raw === 'string') return ['full', 'on', '1', 'true', 'yes'].includes(raw.trim().toLowerCase());
+    }
+    return false;
 }
 
 function noToolsContract(enabled) {
@@ -4981,7 +5072,7 @@ const server = http.createServer(async (req, res) => {
             const tools = effectiveTools;
             const requestNoToolsMode = isNoToolsRequest(rawParams, effectiveTools);
             const guardBlocksOn = resolveGuardBlocks(rawParams, req.headers);
-            const promptOptions = { nativeSearchNotice: webAccess.nativeSearchNotice, noTools: requestNoToolsMode, guards: guardBlocksOn };
+            const promptOptions = { nativeSearchNotice: webAccess.nativeSearchNotice, noTools: requestNoToolsMode, guards: guardBlocksOn, autonomy: resolveAutonomy(rawParams, req.headers) };
             logRow.model = requestedModel;
             const remoteAddr = req.socket.remoteAddress || 'unknown';
             const requestedSession = req.headers['x-agent-session'] || params.session || params.user;
@@ -5422,11 +5513,25 @@ const server = http.createServer(async (req, res) => {
                 if (retryBuild?.autoCompacted) markContextCompacted(res);
                 if (retryBuild?.droppedText) harvestSessionMemory(session, retryBuild.droppedText);
                 // Refactor mode (guards off) keeps the model talking through a patch:
-                // its answer IS prose, so a stalled-narration nudge would fight it.
-                const stalled = keepSession
-                    && promptOptions.guards !== false
-                    && looksLikeStalledNarration(fullContent);
-                const nudge = stalled ? stalledNarrationNudge() : emptyResponseNudge(webFlags.search_enabled);
+                // its answer IS prose, so an initiative nudge would fight it.
+                const initiativeAllowed = promptOptions.guards !== false && keepSession;
+                const stalled = initiativeAllowed && looksLikeStalledNarration(fullContent);
+                const plan = initiativeAllowed && !stalled && looksLikeUnstartedPlan(fullContent);
+                const pause = initiativeAllowed
+                    && !stalled
+                    && !plan
+                    && promptOptions.autonomy === true
+                    && looksLikePermissionPause(fullContent);
+                const loopKey = initiativeAllowed && !stalled && !plan && !pause
+                    ? detectRepeatedToolCall(recentToolCalls(session))
+                    : null;
+                const nudge = stalled
+                    ? stalledNarrationNudge()
+                    : (plan
+                        ? planNudge()
+                        : (pause
+                            ? permissionPauseNudge()
+                            : (loopKey ? toolLoopNudge(loopKey) : emptyResponseNudge(webFlags.search_enabled))));
                 const retryPrompt = keepSession
                     ? nudge
                     : pinToolReminder(
@@ -6142,6 +6247,14 @@ module.exports = {
         emptyResponseNudge,
         stalledNarrationNudge,
         looksLikeStalledNarration,
+        looksLikeUnstartedPlan,
+        planNudge,
+        looksLikePermissionPause,
+        permissionPauseNudge,
+        resolveAutonomy,
+        detectRepeatedToolCall,
+        toolLoopNudge,
+        recentToolCalls,
         nativeToolRepairPrompt,
         noToolsRepairPrompt,
         noToolsContract,

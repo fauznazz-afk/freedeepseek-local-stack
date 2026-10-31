@@ -285,7 +285,8 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 | Login ulang DeepSeek | `npm run auth` |
 | Diagnosa | `npm run doctor` |
 | Tes unit | `node --test tests/unit.test.js` — 125 pass, 0 fail |
-| Tes penuh | `npm test` — 324 pass, 13 fail (baseline) |
+| Tes inisiatif | `node --test tests/initiative.test.js` — 7 pass, 0 fail |
+| Tes penuh | `npm test` — 330 pass, 14 fail (baseline) |
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
 menjalankan proses kedua.
@@ -659,11 +660,12 @@ Detail dan bukti log: [local-stack/REFACTOR-MODE.md](local-stack/REFACTOR-MODE.m
 
 ```powershell
 node --test tests/unit.test.js     # 125 pass, 0 fail
-npm test                           # 324 pass, 13 fail
+npm test                           # 330 pass, 14 fail
 node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
+node --test tests/initiative.test.js                               # 7 pass, 0 fail
 ```
 
-13 kegagalan `npm test` sudah ada sejak baseline upstream — butuh Chrome, macOS,
+14 kegagalan `npm test` sudah ada sejak baseline upstream — butuh Chrome, macOS,
 atau tooling yang tidak ada di mesin ini. Bukan regresi dari perubahan lokal.
 Pakai `node --test tests/unit.test.js` untuk sinyal bersih.
 
