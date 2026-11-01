@@ -2495,6 +2495,167 @@ test('a fresh session starts with a clean compaction record', () => {
   const session = serverInternals.createSession();
   assert.equal(session.compactions, 0);
   assert.equal(session.lastCompactedAt, null);
+  assert.equal(session.openingRequest, null);
+});
+
+test('the opening task statement survives the turn that carried it being evicted', () => {
+  // The opening request is prose, so extractAnchors never sees it, and the turn
+  // holding it is the FIRST thing compaction evicts. A 900-turn session could not
+  // say what it had been asked to do. It is now banked as openingRequest.
+  const session = serverInternals.createSession();
+  session.history.push({ user: 'TASK: refactor the payment module to use the new API', assistant: 'ok' });
+  for (let i = 0; i < 60; i++) {
+    session.history.push({ user: `step ${i}: C:\\repo\\src\\pay${i}.js ` + 'z'.repeat(4000), assistant: 'ok' });
+  }
+  serverInternals.compactHistory(session, 168000, serverInternals.MAX_HISTORY_LENGTH);
+
+  const historyText = session.history.map(e => e.user).join('\n');
+  assert.doesNotMatch(historyText, /refactor the payment module/, 'the opening turn really was evicted');
+  assert.match(session.openingRequest, /refactor the payment module/, 'the task statement was banked');
+
+  const rendered = serverInternals.sessionMemoryText(session);
+  assert.match(rendered, /\[original request\]/, 'the prompt prefix announces it');
+  assert.match(rendered, /refactor the payment module/, 'the model can still see the task');
+});
+
+test('the opening request is banked once and never overwritten', () => {
+  const session = serverInternals.createSession();
+  session.history.push({ user: 'ORIGINAL TASK: build the exporter', assistant: 'ok' });
+  for (let i = 0; i < 30; i++) {
+    session.history.push({ user: `step ${i} ` + 'z'.repeat(4000), assistant: 'ok' });
+  }
+  serverInternals.compactHistory(session, 20000, serverInternals.MAX_HISTORY_LENGTH);
+  assert.match(session.openingRequest, /build the exporter/);
+
+  for (let i = 0; i < 30; i++) {
+    session.history.push({ user: `later ${i} ` + 'z'.repeat(4000), assistant: 'ok' });
+  }
+  serverInternals.compactHistory(session, 20000, serverInternals.MAX_HISTORY_LENGTH);
+  assert.match(session.openingRequest, /build the exporter/, 'a later compaction does not replace it');
+});
+
+test('the ledger drops facts still present in history before unrecoverable ones', () => {
+  // The cap used to shift() the oldest line unconditionally, which threw away the
+  // only surviving copy of the earliest work: a 900-turn session could not name a
+  // single file from its first 100 steps. A fact whose turn is still in the
+  // transcript is recoverable from there; one whose turn is gone is not.
+  const session = serverInternals.createSession();
+  for (let i = 0; i < 40; i++) {
+    session.history.push({ user: `recent C:\\repo\\src\\recent${i}.js`, assistant: 'ok' });
+  }
+  session.memory = [];
+  for (let i = 0; i < 40; i++) session.memory.push(`C:\\repo\\src\\recent${i}.js`);          // redundant
+  for (let i = 0; i < 600; i++) session.memory.push(`C:\\repo\\src\\ancient\\deep\\lost${i}.js`); // unrecoverable
+
+  const before = session.memory.reduce((n, l) => n + l.length + 1, 0);
+  assert.ok(before > serverInternals.MAX_SESSION_MEMORY_CHARS,
+    `the fixture must overflow the cap or the branch is never reached, got ${before}`);
+
+  serverInternals.harvestSessionMemory(session, 'C:\\repo\\src\\brandnew.js');
+
+  const chars = session.memory.reduce((n, l) => n + l.length + 1, 0);
+  assert.ok(chars <= serverInternals.MAX_SESSION_MEMORY_CHARS, `ledger must stay under the cap, got ${chars}`);
+  const redundant = session.memory.filter(l => /recent\d+\.js/.test(l)).length;
+  const unrecoverable = session.memory.filter(l => /lost\d+\.js/.test(l)).length;
+  assert.ok(redundant < 40, 'lines still present in history are the ones evicted');
+  assert.ok(unrecoverable > 0, 'unrecoverable lines are not the first to go');
+});
+
+test('the ledger still keeps the newest facts when every line is unrecoverable', () => {
+  // No redundant line exists, so the cap must fall back to dropping the oldest -
+  // otherwise the ledger would grow without bound.
+  const session = serverInternals.createSession();
+  session.memory = [];
+  for (let i = 0; i < 600; i++) session.memory.push(`C:\\repo\\src\\gone\\very\\deep\\path\\only${i}.js`);
+  const before = session.memory.reduce((n, l) => n + l.length + 1, 0);
+  assert.ok(before > serverInternals.MAX_SESSION_MEMORY_CHARS, 'the fixture must overflow the cap');
+
+  serverInternals.harvestSessionMemory(session, 'C:\\repo\\src\\extra.js');
+
+  const chars = session.memory.reduce((n, l) => n + l.length + 1, 0);
+  assert.ok(chars <= serverInternals.MAX_SESSION_MEMORY_CHARS, 'the cap is still enforced');
+  assert.ok(session.memory.some(l => /only599\.js/.test(l)), 'the newest unrecoverable fact survives');
+  assert.ok(!session.memory.some(l => /only0\.js/.test(l)), 'the oldest is dropped once nothing is redundant');
+});
+
+test('dropping the history also drops the banked opening request', () => {
+  // A banked opening request belongs to the conversation that produced it. If it
+  // survived a reset, the next conversation would be told its task was the old
+  // one - worse than having no task line at all.
+  const session = serverInternals.createSession();
+  session.history.push({ user: 'TASK: the abandoned project', assistant: 'ok' });
+  for (let i = 0; i < 40; i++) session.history.push({ user: `x${i} ` + 'z'.repeat(4000), assistant: 'ok' });
+  serverInternals.compactHistory(session, 20000, serverInternals.MAX_HISTORY_LENGTH);
+  assert.match(session.openingRequest, /abandoned project/, 'banked first');
+
+  serverInternals.sessions.set('opening-reset-probe', session);
+  try {
+    serverInternals.resetAgentSession('opening-reset-probe', { dropHistory: true });
+  } finally {
+    serverInternals.sessions.delete('opening-reset-probe');
+  }
+  assert.equal(session.history.length, 0, 'history cleared');
+  assert.equal(session.openingRequest, null, 'the stale opening request is cleared too');
+  assert.doesNotMatch(serverInternals.sessionMemoryText(session), /abandoned project/,
+    'a fresh conversation is not told the old task');
+});
+
+test('a reset that keeps history keeps the opening request', () => {
+  // Plain reset (no &history=drop) preserves the transcript for recovery, so the
+  // opening request still describes the same conversation and must stay.
+  const session = serverInternals.createSession();
+  session.openingRequest = 'TASK: still relevant';
+  session.history.push({ user: 'u', assistant: 'a' });
+  serverInternals.sessions.set('opening-keep-probe', session);
+  try {
+    serverInternals.resetAgentSession('opening-keep-probe', { dropHistory: false });
+  } finally {
+    serverInternals.sessions.delete('opening-keep-probe');
+  }
+  assert.equal(session.openingRequest, 'TASK: still relevant', 'a recovery reset keeps it');
+});
+
+test('a growing conversation never looks like a new chat', () => {
+  // Regression, and the reason compaction barely ever ran on a real agent: the
+  // fingerprint hashed the first TWO user turns, so on request 2 the key changed
+  // on its own (turn 2 had not existed during request 1). The proxy concluded the
+  // client had switched chats and wiped the history it had just stored, on every
+  // session, on its second request.
+  const turns = ['lanjut', 'kerjakan modul A', 'tambahkan tes', 'jalankan npm test'];
+  const u = (t) => ({ role: 'user', content: t });
+  let stored = null;
+  for (let n = 1; n <= turns.length; n++) {
+    const messages = turns.slice(0, n).map(u);
+    if (stored !== null) {
+      assert.equal(serverInternals.conversationKeyChanged(stored, messages), false,
+        `turn ${n} must continue the same conversation`);
+    }
+    stored = serverInternals.conversationFingerprint(messages);
+  }
+});
+
+test('two chats that share an opening message are still told apart', () => {
+  // The naive fix (hash only the first turn) stabilised the key but merged every
+  // chat that opens with the same words. Comparison is prefix-aware instead.
+  const u = (t) => ({ role: 'user', content: t });
+  const chatA = [u('lanjut'), u('kerjakan modul A')];
+  const chatB = [u('lanjut'), u('kerjakan modul B')];
+  const keyA = serverInternals.conversationFingerprint(chatA);
+  assert.equal(serverInternals.conversationKeyChanged(keyA, chatB), true,
+    'a different second turn means a different conversation');
+  assert.equal(serverInternals.conversationKeyChanged(keyA, [u('lanjut'), u('kerjakan modul A'), u('lanjutkan')]), false,
+    'turn 3 extends the same conversation');
+  assert.equal(serverInternals.conversationKeyChanged(keyA, [u('lanjut'), u('kerjakan modul Z')]), true,
+    'an edited turn 2 is a different conversation');
+});
+
+test('conversation key comparison ignores assistant and tool messages', () => {
+  const u = (t) => ({ role: 'user', content: t });
+  const key = serverInternals.conversationFingerprint([u('lanjut'), u('modul A')]);
+  const withNoise = [u('lanjut'), u('modul A'), { role: 'assistant', content: 'ok' }, { role: 'tool', content: 'x' }];
+  assert.equal(serverInternals.conversationKeyChanged(key, withNoise), false);
+  assert.equal(serverInternals.conversationKeyChanged(null, withNoise), false, 'no stored key is never a switch');
+  assert.equal(serverInternals.conversationFingerprint([]), null);
 });
 
 test('loadSessions restores the compaction record from disk', () => {

@@ -256,6 +256,7 @@ function serializeSessions() {
             decisions: Array.isArray(session.decisions) ? session.decisions : [],
             compactions: session.compactions || 0,
             lastCompactedAt: session.lastCompactedAt || null,
+            openingRequest: session.openingRequest || null,
             sentSystemFingerprint: session.sentSystemFingerprint || null,
             conversationKey: session.conversationKey || null,
             lastActivityAt: session.lastActivityAt || Date.now(),
@@ -320,6 +321,7 @@ function loadSessions() {
                 decisions: Array.isArray(session.decisions) ? session.decisions : [],
                 compactions: session.compactions || 0,
                 lastCompactedAt: session.lastCompactedAt || null,
+                openingRequest: session.openingRequest || null,
                 sentSystemFingerprint: session.sentSystemFingerprint || null,
                 conversationKey: session.conversationKey || null,
                 lastActivityAt: session.lastActivityAt || now,
@@ -1091,6 +1093,7 @@ function createSession() {
         decisions: [],
         compactions: 0,
         lastCompactedAt: null,
+        openingRequest: null,
         sentSystemFingerprint: null,
         conversationKey: null,
         emptyStreak: 0,
@@ -1120,7 +1123,13 @@ function resetRemoteSession(session) {
 function resetAgentSession(agentId, { dropHistory = false } = {}) {
     const session = sessions.get(agentId);
     if (!session) return null;
-    if (dropHistory) session.history = [];
+    if (dropHistory) {
+        session.history = [];
+        // The transcript is gone because the client abandoned the conversation.
+        // A banked opening request from that conversation would be handed to the
+        // next one as "[original request]", i.e. the wrong task.
+        session.openingRequest = null;
+    }
     const historyCount = session.history.length;
     const historyPreview = session.history.map(e => String(e.user || '').substring(0, 40)).join(' | ');
     resetRemoteSession(session);
@@ -3611,9 +3620,14 @@ function compactHistory(session, budgetChars, maxEntries) {
             .map(entry => `User: ${String(entry?.user || '')}\nAssistant: ${String(entry?.assistant || '')}`)
             .join('\n\n');
         const added = harvestSessionMemory(session, text);
+        // The opening task is prose, so extractAnchors does not see it and the turn
+        // that carried it is now gone: a 900-turn session could not say what it had
+        // been asked to do. Bank the first surviving turn's request the first time
+        // compaction evicts the turn that opened the conversation.
+        const opening = bankOpeningRequest(session, evicted);
         session.compactions = (session.compactions || 0) + 1;
         session.lastCompactedAt = Date.now();
-        console.log(`[compact] agent history trimmed: -${dropped} entr${dropped === 1 ? 'y' : 'ies'}, ${chars} chars left, +${added} banked fact(s)`);
+        console.log(`[compact] agent history trimmed: -${dropped} entr${dropped === 1 ? 'y' : 'ies'}, ${chars} chars left, +${added} banked fact(s)${opening ? ', opening request kept' : ''}`);
     }
     return dropped;
 }
@@ -3770,14 +3784,51 @@ function hasExplicitConversationHistory(messages) {
 // OpenCode does not send a per-chat session id: each request carries the full
 // transcript instead. Fingerprint the conversation's root user turns so the
 // proxy can tell an unrelated chat from a continuation of the sticky remote
-// session. First two user turns (capped) — a shared opener like "lanjut" alone
-// would collide across chats.
+// session.
+//
+// The key must be stable as a conversation GROWS and still differ between chats.
+// Hashing "the first two user turns" satisfied the second half and broke the
+// first: on turn 1 there was no second turn, so the key changed on its own
+// between request 1 and request 2, the proxy concluded the client had switched
+// chats, and wiped the history it had just stored. Every session reset itself on
+// its second request - compaction almost never ran on a real agent, and a
+// resumed chat kept losing its opening task.
+//
+// Hashing only the first turn fixes the instability but merges two chats that
+// happen to open with the same words. So the key is a list of per-turn hashes and
+// comparison is prefix-aware (see conversationKeyChanged).
+const CONVERSATION_KEY_TURNS = 2;
+
+function conversationTurnHashes(messages) {
+    return (messages || [])
+        .filter(msg => msg && msg.role === 'user')
+        .map(msg => normalizeMessageContent(msg.content).trim())
+        .filter(Boolean)
+        .map(text => fingerprintPrompt(text.slice(0, 4000)));
+}
+
 function conversationFingerprint(messages) {
-    const userTurns = (messages || []).filter(msg => msg && msg.role === 'user')
-        .map(msg => normalizeMessageContent(msg.content).trim()).filter(Boolean);
-    if (userTurns.length === 0) return null;
-    const root = userTurns.slice(0, 2).map((text, i) => text.slice(0, i === 0 ? 4000 : 500)).join('\u0000');
-    return fingerprintPrompt(root);
+    const hashes = conversationTurnHashes(messages);
+    if (hashes.length === 0) return null;
+    return hashes.slice(0, CONVERSATION_KEY_TURNS).join('|');
+}
+
+// True when `messages` belongs to a different conversation than `storedKey`.
+// Extension is continuity (the same chat, one turn later); anything else is a
+// switch. A truncated prefix is treated as a switch on purpose: that is a client
+// resuming an edited chat, whose remote state no longer matches.
+function conversationKeyChanged(storedKey, messages) {
+    if (!storedKey) return false;
+    const hashes = conversationTurnHashes(messages);
+    if (hashes.length === 0) return false;
+    const stored = String(storedKey).split('|').filter(Boolean);
+    if (stored.length === 0) return false;
+    const shared = Math.min(stored.length, hashes.length);
+    for (let i = 0; i < shared; i++) {
+        if (stored[i] !== hashes[i]) return true;
+    }
+    // Every shared turn matches: a strict extension continues the chat.
+    return hashes.length < stored.length;
 }
 
 // Long-term memory ledger helpers. `harvestSessionMemory` pulls the anchors
@@ -3799,8 +3850,24 @@ function harvestSessionMemory(session, droppedText) {
     }
     if (added > 0) {
         let size = session.memory.reduce((n, l) => n + l.length + 1, 0);
-        while (size > MAX_SESSION_MEMORY_CHARS && session.memory.length > 1) {
-            size -= session.memory.shift().length + 1;
+        if (size > MAX_SESSION_MEMORY_CHARS) {
+            // Evict the cheapest lines first: a fact whose turn is STILL in the
+            // current transcript is recoverable from there, while a fact whose
+            // turn compaction already dropped exists nowhere else. Dropping the
+            // oldest unconditionally threw away the only surviving copy of the
+            // earliest work - a 900-turn session ended up unable to name a single
+            // file from its first 100 steps. Only fall back to dropping the
+            // oldest when every line is still present in the history.
+            const historyText = session.history
+                .map(e => `${String(e?.user || '')}\n${String(e?.assistant || '')}`)
+                .join('\n');
+            const inHistory = (line) => line.length > 0 && historyText.includes(line);
+            while (size > MAX_SESSION_MEMORY_CHARS && session.memory.length > 1) {
+                const redundant = session.memory.findIndex(inHistory);
+                const victim = redundant >= 0 ? redundant : 0;
+                size -= session.memory[victim].length + 1;
+                session.memory.splice(victim, 1);
+            }
         }
         session.memory = session.memory.slice(-800);
     }
@@ -3823,14 +3890,46 @@ function harvestSessionMemory(session, droppedText) {
     }
     return added;
 }
+// The opening request is prose, so extractAnchors never sees it - and the turn
+// carrying it is the first thing compaction evicts. A 900-turn session could not
+// answer "what was I asked to do" once that happened. Bank the request from the
+// first surviving turn the first time compaction evicts the opening turn, so the
+// task statement outlives the transcript. Returns true when something was banked.
+function bankOpeningRequest(session, evicted) {
+    if (!session || !Array.isArray(evicted) || evicted.length === 0) return false;
+    if (session.openingRequest) return false; // banked once, keep the original
+    if (!Array.isArray(session.history) || session.history.length === 0) return false;
+    // History entries are stored as formatted prompt text, so strip the envelope
+    // ("User: ", "Assistant: ") before banking the request itself.
+    const clean = (text) => String(text || '')
+        .replace(/^\s*(?:User|Assistant|System|Tool)\s*:\s*/i, '')
+        .trim();
+    // A tool-result envelope is not a task statement; skip it and use the first
+    // surviving turn that reads like prose.
+    const looksLikeTask = (text) => text.length >= 8 && !/^\[(?:Tool Result|Tool|Recovery)/i.test(text);
+    let source = clean(evicted[0]?.user);
+    if (!looksLikeTask(source)) {
+        source = '';
+        for (const entry of session.history) {
+            const candidate = clean(entry?.user);
+            if (looksLikeTask(candidate)) { source = candidate; break; }
+        }
+    }
+    if (!source) return false;
+    session.openingRequest = source.slice(0, 500);
+    return true;
+}
+
 function sessionMemoryText(session, skipLines) {
     const anchors = Array.isArray(session.memory) ? session.memory : [];
     const decisions = Array.isArray(session.decisions) ? session.decisions : [];
-    if (anchors.length === 0 && decisions.length === 0) return '';
+    const opening = typeof session?.openingRequest === 'string' ? session.openingRequest.trim() : '';
+    if (anchors.length === 0 && decisions.length === 0 && !opening) return '';
     const lines = skipLines instanceof Set
         ? anchors.filter(line => !skipLines.has(line))
         : anchors;
     let text = `${SESSION_MEMORY_HEADER}\n`;
+    if (opening) text += `[original request] ${opening}\n`;
     if (lines.length > 0) text += `${lines.join('\n')}\n`;
     if (decisions.length > 0) text += `[decisions]\n${decisions.join('\n')}\n`;
     return `${text}\n`;
@@ -5632,13 +5731,17 @@ async function handler(req, res) {
             // context. Before the recovery history disappears, bank its anchors
             // into the session/shared ledgers - those facts outlive the chat.
             const convoKey = conversationFingerprint(messages);
-            if (convoKey && session.conversationKey && session.conversationKey !== convoKey) {
+            if (convoKey && session.conversationKey && conversationKeyChanged(session.conversationKey, messages)) {
                 const dropped = resetRemoteSession(session);
                 if (Array.isArray(session.history) && session.history.length) {
                     const lost = harvestSessionMemory(session, session.history.map(e => `${e.user || ''}\n${e.assistant || ''}`).join('\n'));
                     if (lost) console.log(`${agentTag} Session memory +${lost} anchor(s) banked from ${session.history.length} dropped turn(s).`);
                 }
                 session.history = [];
+                // Same reason as resetAgentSession: this transcript belonged to a
+                // different conversation, so its opening request must not follow
+                // the client into the new one.
+                session.openingRequest = null;
                 console.log(`${agentTag} Client switched conversation; reset remote chat ${dropped.failedSessionId || '(none)'} and ${dropped.failedMessageCount || 0} message(s) of history.`);
             }
             if (convoKey) session.conversationKey = convoKey;
@@ -6740,6 +6843,7 @@ module.exports = {
         extractAnchors: contextLib.extractAnchors,
         hasExplicitConversationHistory,
         conversationFingerprint,
+        conversationKeyChanged,
         buildRecoveryHistoryPrefix,
         SESSION_TTL_MS,
         SESSION_IDLE_EVICT_MS,
