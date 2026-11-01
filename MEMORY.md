@@ -24,8 +24,8 @@ to 9router. Runs on Windows on this machine.
 - Restart: `deepseek-local restart` - waits for ports 9655/20128 to stop listening
   before starting, instead of a fixed sleep that raced TIME_WAIT sockets
 - Full chain check: `deepseek-local verify` or `local-stack\Verify-All.bat` - expect `CHAIN_OK`
-- Unit tests: `node --test tests/unit.test.js` - expect 106 pass
-- Full suite: `npm test` - 291 pass, 13 fail (pre-existing: need Chrome/macOS)
+- Unit tests: `node --test tests/unit.test.js` - expect 129 pass
+- Full suite: `npm test` - 379 pass, 13 fail (pre-existing: need Chrome/macOS)
 
 ## Decisions
 
@@ -162,4 +162,8 @@ to 9router. Runs on Windows on this machine.
 ## Traps (new)
 
 - **pwsh `Out-File` / `>` mangles non-ASCII git output.** `git show ...:file | Out-File` decodes UTF-8 bytes with the console codepage, so ｜ (U+FF5C) becomes mojibake. Copy unicode files with `cmd /c "git show ... > dest"` (byte-exact) or the write tool. Cost a full debug loop on the DSML parser port (2026-11-01).
-- Test counts went stale here (291/106). `npm test` = 376 pass, 13 fail as of 2026-11-01; `node --test tests/unit.test.js` = 126 pass.
+- Test counts went stale here (291/106). `npm test` = 379 pass, 13 fail as of 2026-11-01; `node --test tests/unit.test.js` = 129 pass, `tests/account-failover.test.js` = 76 pass.
+- **`prompt_tokens` is the CLIENT transcript, not upstream load.** `buildUsage` estimates `messages[].content` chars / 4, so a sticky session reports the whole resent transcript while forwarding only the delta. `upstream_prompt_tokens` / `upstream_prompt_chars` / `prompt_amplification` were added for the real figure. A 460k-token row with `completion_tokens: 0` is a tool call, not a failed retry — `buildToolCallResponse` passes `''` as content, so completion is legitimately 0.
+- **History entries used to be whole-transcript snapshots.** `storeHistory` received the formatted `prompt`, so 38 turns of one real session held 468k chars of duplicated transcript (every entry's first 200 chars identical). `newestTurnText()` now stores only the delta: 47.5% smaller in simulation, 48.7% on real `data/sessions.json`.
+- **`DEEPSEEK_MAX_HISTORY_CHARS` was unbounded relative to the prompt cap.** `buildBoundedPrompt` gives history only `HISTORY_BUDGET_SHARE` (35%) of `DEEPSEEK_MAX_PROMPT_CHARS`, so local-stack setting both to 480000 stored text that could never reach the model. Now clamped by `MAX_HISTORY_CHARS_BUDGET`.
+- **Agent configs advertised a 1M context window the proxy cannot deliver.** `setup-agents.js` wrote `limit.context: 1048576` / `context_window: 1048576`, so client auto-compaction never fired. Now derived from the cap: `PROMPT_CHAR_CAP / 4` (200k default, 120k with local-stack's 480000). Re-run `npm run setup:agents` after changing the cap.

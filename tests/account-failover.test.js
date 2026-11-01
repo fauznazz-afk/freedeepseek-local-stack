@@ -900,6 +900,7 @@ function forgetAgents(t, ...agents) {
 const REQUEST_VIEW_KEYS = [
   'account', 'agent', 'api', 'completion_tokens', 'error_message', 'error_type', 'id', 'ip', 'local',
   'model', 'ms', 'ok', 'path', 'prompt_tokens', 'reasoning_tokens', 'status', 'stream', 'ts', 'usd',
+  'upstream_prompt_chars', 'upstream_prompt_tokens',
 ].sort();
 
 test('GET /admin/requests lists request metadata newest first, never prompt or answer text', async (t) => {
@@ -944,6 +945,11 @@ test('GET /admin/requests lists request metadata newest first, never prompt or a
   assert.ok(openai.prompt_tokens > 0 && openai.completion_tokens > 0);
   assert.equal(openai.reasoning_tokens, 0);
   assert.ok(openai.usd > 0);
+  // The client transcript size and the upstream prompt are tracked separately:
+  // a sticky session forwards only the delta, so the two must not be conflated.
+  assert.ok(openai.upstream_prompt_tokens > 0, 'upstream prompt size is recorded');
+  assert.ok(openai.upstream_prompt_chars > 0);
+  assert.equal(openai.upstream_prompt_tokens, Math.ceil(openai.upstream_prompt_chars / 4));
   assert.equal(openai.error_type, null);
   assert.equal(openai.error_message, null);
 
@@ -1026,10 +1032,10 @@ test('the request log is capped at 400 rows and error text is scrubbed of creden
 test('GET /admin/usage aggregates estimated tokens by account, model, endpoint, agent, and time', async (t) => {
   freshRequestStats(t);
   const now = Date.now();
-  const row = (ago, extra) => ({ ts: now - ago, ip: '127.0.0.1', path: '/v1/chat/completions', status: 200, ok: true, prompt_tokens: 100, completion_tokens: 50, reasoning_tokens: 0, usd: 0.0001, ms: 1000, agent: 'cli', account: 'acc1', model: 'deepseek-v4-flash', ...extra });
+  const row = (ago, extra) => ({ ts: now - ago, ip: '127.0.0.1', path: '/v1/chat/completions', status: 200, ok: true, prompt_tokens: 100, upstream_prompt_tokens: 20, completion_tokens: 50, reasoning_tokens: 0, usd: 0.0001, ms: 1000, agent: 'cli', account: 'acc1', model: 'deepseek-v4-flash', ...extra });
   S.recordRequest(row(10 * 60_000));
   S.recordRequest(row(20 * 60_000, { account: 'acc2', model: 'deepseek-v4-flash-thinking', reasoning_tokens: 20, agent: 'dashboard:c1' }));
-  S.recordRequest(row(30 * 60_000, { ok: false, status: 429, prompt_tokens: 0, completion_tokens: 0, usd: 0, account: null, error_type: 'rate_limit' }));
+  S.recordRequest(row(30 * 60_000, { ok: false, status: 429, prompt_tokens: 0, upstream_prompt_tokens: 0, completion_tokens: 0, usd: 0, account: null, error_type: 'rate_limit' }));
   S.recordRequest(row(2 * 3600_000, { path: '/v1/messages', api: 'anthropic' }));
   S.recordRequest(row(30 * 3600_000, { account: 'acc2' }));
   const port = await startServer(t);
@@ -1048,6 +1054,10 @@ test('GET /admin/usage aggregates estimated tokens by account, model, endpoint, 
     { requests: 3, errors: 1, prompt_tokens: 200, completion_tokens: 100, reasoning_tokens: 20 },
   );
   assert.equal(hour.totals.avg_ms, 1000);
+  // Client transcript volume vs what actually went upstream, plus the ratio
+  // between them: 200 client tokens against 40 upstream is a 5x amplification.
+  assert.equal(hour.totals.upstream_prompt_tokens, 40);
+  assert.equal(hour.totals.prompt_amplification, 5);
   const seriesSum = hour.series.reduce((sum, b) => sum + b.requests, 0);
   assert.equal(seriesSum, 3);
   assert.ok(hour.series.every((b, i, a) => i === 0 || b.t - a[i - 1].t === 60_000), 'dense, evenly spaced buckets');
@@ -1060,6 +1070,7 @@ test('GET /admin/usage aggregates estimated tokens by account, model, endpoint, 
   assert.equal(byKey(hour.by_model)['deepseek-v4-flash-thinking'].reasoning_tokens, 20);
   assert.equal(byKey(hour.by_endpoint)['/v1/chat/completions'].requests, 3);
   assert.equal(byKey(hour.by_agent)['dashboard:c1'].prompt_tokens, 100);
+  assert.equal(byKey(hour.by_agent)['dashboard:c1'].upstream_prompt_tokens, 20);
   assert.deepEqual(hour.by_model.map(e => e.requests), [2, 1], 'breakdowns sort by requests, descending');
 
   res = await request(port, 'GET', '/admin/usage?window=24h');

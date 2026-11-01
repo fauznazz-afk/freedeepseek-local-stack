@@ -156,6 +156,21 @@ Errors are always `{ "error": { "message", "type" } }`. Responses carry `Cache-C
 
 Access: with `PROXY_API_KEY`, the same bearer as `/v1/*`. Without a key, only direct loopback clients; a request with `X-Forwarded-For`, `Forwarded`, or `X-Real-IP`, a non-localhost `Host` (DNS rebinding), or an `Origin` other than the proxy's own (another local web app) gets `403 admin_forbidden`. A reverse proxy that adds none of those headers looks local: set `PROXY_API_KEY` behind one. `PROXY_ADMIN_ALLOW_REMOTE=1` lifts only the client address and forwarding-header rules; the `Host` must still be loopback, an IP literal, or a host listed in `PROXY_CORS_ORIGINS`, and the `Origin` rule stays. Browser POSTs still pass the origin guard, so a non-loopback dashboard origin must be listed in `PROXY_CORS_ORIGINS`.
 
+#### Client prompt vs upstream prompt
+
+`GET /admin/requests` and `GET /admin/usage` report **two** prompt sizes, because on a sticky session they measure different things:
+
+| Field | Meaning |
+|---|---|
+| `prompt_tokens` | The **client's** input, estimated at 4 chars/token from the joined `messages[].content`. This is the whole transcript an agent client resends every turn. |
+| `upstream_prompt_tokens` | What this proxy actually sent to DeepSeek for that turn, after sticky-delta reduction and compaction. |
+| `upstream_prompt_chars` | The same, in characters, before the token estimate. |
+| `prompt_amplification` | `prompt_tokens / upstream_prompt_tokens`. Only on `/admin/usage` aggregates. `null` when either side is zero. |
+
+A large `prompt_amplification` is expected and not a bug: OpenCode, Codex and Claude Code resend their entire conversation on every request, while a live sticky session forwards only the new delta. A ratio of 4x means three quarters of the reported "prompt tokens" is context the model never received. Read `upstream_prompt_tokens` when you want the real load on DeepSeek.
+
+Neither figure is DeepSeek billing. The web lane has no token meter, so `cached_tokens` is always `0` and `usd` is an estimate at the configured input/output per-million prices.
+
 `accounts[]` item (never contains token, cookie values, `hif_*`, `wasmUrl`, or file names):
 
 ```json
@@ -268,7 +283,7 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 | `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one Web chat is reused before a fresh one is opened |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Messages per chat before a forced reset. Minimum 2 |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Local turns replayed into a replacement chat. Raise with `MAX_MESSAGE_DEPTH` |
-| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Char budget for that replay. Minimum 1000 |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Char budget for that replay. Minimum 1000. Clamped at runtime to 35% of `DEEPSEEK_MAX_PROMPT_CHARS` (`HISTORY_BUDGET_SHARE`) |
 | `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Per-session ledger of dropped paths, commands and errors |
 | `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Shared project ledger inherited by new agent keys. `0` = off |
 | `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | How long an idle session survives on disk |
@@ -281,11 +296,11 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 
 Values above are built-in defaults. `local-stack/settings.local.ps1` overrides
 them per machine and is git-ignored; `start.ps1` dot-sources it on every launch.
-The current machine raises `DEEPSEEK_MAX_PROMPT_CHARS` and
-`DEEPSEEK_MAX_HISTORY_CHARS` to `480000`, sets `DEEPSEEK_REQUEST_DEADLINE_MS`
-to `300000` and `DEEPSEEK_ACCOUNT_COOLDOWN_MS` to `30000`, and turns the shared
-memory ledger on. A fresh clone gets the built-in defaults until `npm run setup`
-copies the example and you edit it. Source of truth: `README.md` →
-[Konfigurasi env](../README.md#konfigurasi-env).
+The current machine raises `DEEPSEEK_MAX_PROMPT_CHARS` to `480000` (so the
+effective history budget becomes `168000` chars, 35% of the cap), sets
+`DEEPSEEK_REQUEST_DEADLINE_MS` to `300000` and `DEEPSEEK_ACCOUNT_COOLDOWN_MS` to
+`30000`, and turns the shared memory ledger on. A fresh clone gets the built-in
+defaults until `npm run setup` copies the example and you edit it. Source of
+truth: `README.md` → [Konfigurasi env](../README.md#konfigurasi-env).
 
 Docker: [`Containerfile`](../Containerfile). Auth: [`auth.md`](auth.md). Models: [`models.md`](models.md).

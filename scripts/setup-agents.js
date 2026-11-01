@@ -36,6 +36,18 @@ const CODEX_BASE_INSTRUCTIONS = 'You are a coding agent. Follow developer instru
 const CODEX_NATIVE_SEARCH_INSTRUCTIONS = 'Do not use the Codex/harness web search tool. DeepSeek native Web Search is enabled — use it for live web data and report the findings.';
 const OPENCODE_MODEL_LABEL = 'DeepSeek 4.1';
 const OPENCODE_PROVIDER_LABEL = 'Flash';
+// The proxy caps what it forwards upstream at DEEPSEEK_MAX_PROMPT_CHARS (800k
+// chars by default, 480k in local-stack) and estimates tokens at 4 chars each.
+// Every agent config used to declare a 1M-token window, which is 8x more room
+// than the proxy can actually deliver: auto-compaction never fired, the client
+// kept resending an ever-growing transcript, and the proxy reported the whole
+// thing as "prompt tokens" while forwarding only a small delta. Publishing the
+// real budget is what makes client-side compaction trigger at the right moment.
+const PROMPT_CHAR_CAP = (() => {
+  const raw = Number(process.env.DEEPSEEK_MAX_PROMPT_CHARS);
+  return Math.max(1000, Math.floor(Number.isFinite(raw) && raw > 0 ? raw : 800000));
+})();
+const CONTEXT_WINDOW_TOKENS = Math.max(8192, Math.floor(PROMPT_CHAR_CAP / 4));
 const AGENT_FILE_MAX_BYTES = 1024 * 1024;
 const BACKUP_ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(?:-[a-z0-9]{4})?$/;
 
@@ -490,8 +502,8 @@ function codexCatalog() {
       support_verbosity: false,
       default_verbosity: null,
       input_modalities: ['text', 'image'],
-      context_window: 1048576,
-      max_context_window: 1048576,
+      context_window: CONTEXT_WINDOW_TOKENS,
+      max_context_window: CONTEXT_WINDOW_TOKENS,
       effective_context_window_percent: 95,
       experimental_supported_tools: [],
       truncation_policy: { mode: 'tokens', limit: 10000 },
@@ -871,7 +883,7 @@ const TARGETS = {
             reasoning: id.includes('thinking'),
             tool_call: true,
             modalities: { input: ['text', 'image'], output: ['text'] },
-            limit: { context: 1048576, output: 8192 },
+            limit: { context: CONTEXT_WINDOW_TOKENS, output: 8192 },
           };
         }
         cfg.$schema = cfg.$schema || 'https://opencode.ai/config.json';
@@ -966,6 +978,9 @@ const TARGETS = {
           reasoning: id.includes('thinking'),
           input: ['text', 'image'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          // OpenClaw already declared a conservative window; leave it alone. The
+          // bug was over-declaring (1M), and raising this would only delay its
+          // own compaction.
           contextWindow: 128000,
           maxTokens: 8192,
         }));

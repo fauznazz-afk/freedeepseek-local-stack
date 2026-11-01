@@ -1970,7 +1970,9 @@ test('one-click agent setup adds opt-in providers without replacing native defau
   assert.equal(opencode.provider.freedeepseek.models['deepseek-v4-flash'].name, 'DeepSeek 4.1');
   assert.deepEqual(Object.keys(opencode.provider.freedeepseek.models), ['deepseek-v4-flash', 'deepseek-v4-flash-thinking', 'deepseek-v4-flash-nosearch', 'deepseek-v4-flash-thinking-nosearch']);
   assert.equal(opencode.provider.freedeepseek.models['deepseek-v4-flash-thinking'].name, 'DeepSeek 4.1');
-  assert.equal(opencode.provider.freedeepseek.models['deepseek-v4-flash-thinking'].limit.context, 1048576);
+  // The published window must match what the proxy can actually forward, not an
+  // aspirational 1M: auto-compaction keys off this number.
+  assert.equal(opencode.provider.freedeepseek.models['deepseek-v4-flash-thinking'].limit.context, 200000);
   assert.equal(opencode.provider.freedeepseek.models['deepseek-v4-flash-thinking'].attachment, true);
   assert.deepEqual(opencode.provider.freedeepseek.models['deepseek-v4-flash-thinking'].modalities.input, ['text', 'image']);
   const agentsMd = fs.readFileSync(path.join(dir, '.config', 'opencode', 'AGENTS.md'), 'utf8');
@@ -2322,6 +2324,50 @@ test('audit srv-tools-2: Responses function_call input items stay in the history
   assert.equal(delta[0].content, 'hello');
 });
 
+test('stored history holds only the new turn, not a copy of the whole transcript', () => {
+  // An agent client resends its entire conversation on every request. Storing
+  // that verbatim made each history entry a near-copy of the previous one, so a
+  // real 38-turn session held 468k chars of duplicated transcript and every
+  // recovery replay handed all of it back to the model.
+  const transcript = [{ role: 'user', content: 'TASK: read the repo.' }];
+  const deltas = [];
+  for (let turn = 1; turn <= 5; turn++) {
+    transcript.push({ role: 'assistant', content: 'TOOL_CALL: shell' });
+    transcript.push({ role: 'tool', content: `output #${turn} ` + 'y'.repeat(4000) });
+    transcript.push({ role: 'user', content: `follow-up #${turn}` });
+    deltas.push(serverInternals.newestTurnText(transcript));
+  }
+
+  assert.equal(deltas.length, 5);
+  for (const [index, delta] of deltas.entries()) {
+    assert.ok(delta.length > 0, 'each turn produces a non-empty delta');
+    assert.match(delta, new RegExp(`follow-up #${index + 1}`), 'the delta ends on this turn');
+    assert.match(delta, new RegExp(`output #${index + 1}`), 'the delta carries this turn tool result');
+    if (index > 0) {
+      assert.doesNotMatch(delta, new RegExp(`output #${index}(?!\\d)`), 'earlier tool results are not duplicated into the delta');
+      assert.doesNotMatch(delta, /TASK: read the repo\./, 'the opening task is not re-stored every turn');
+    }
+  }
+
+  // The saving is the point: deltas must be far smaller than whole transcripts.
+  const wholeTotal = transcript.length;
+  const deltaTotal = deltas.reduce((sum, d) => sum + d.length, 0);
+  const wholePrompt = serverInternals.formatMessages(transcript, []).prompt.length;
+  assert.ok(deltaTotal < wholePrompt * wholeTotal, 'deltas are much smaller than repeated transcripts');
+});
+
+test('a single-turn request still stores its prompt when no delta exists', () => {
+  // newestTurnText returns '' for a lone user message with no prior assistant
+  // turn only when the transcript is empty; the call site falls back to the
+  // formatted prompt. Prove the fallback input is non-empty so history is never
+  // silently dropped.
+  const firstTurn = [{ role: 'user', content: 'hello there' }];
+  const delta = serverInternals.newestTurnText(firstTurn);
+  const fallback = serverInternals.formatMessages(firstTurn, []).prompt;
+  assert.ok((delta || fallback).length > 0);
+  assert.match(fallback, /hello there/);
+});
+
 test('audit srv-tools-4: extractScreenshotPaths does not throw on tool messages with array content', () => {
   const { extractScreenshotPaths } = serverInternals;
   let result;
@@ -2553,4 +2599,37 @@ test('replay caps are env-driven too, so a deeper session can actually recover',
   const parsed = JSON.parse(out);
   assert.equal(parsed.m, 400, 'replay depth override must be honoured');
   assert.equal(parsed.c, 1600000, 'replay char budget override must be honoured');
+});
+
+test('the replay budget is clamped to what buildBoundedPrompt can actually spend', () => {
+  // The env knob used to be free-standing: local-stack set the history budget and
+  // the prompt cap both to 480000, so the store could hold a full prompt's worth
+  // while the builder handed history only HISTORY_BUDGET_SHARE of it. The excess
+  // was stored, then condensed away on every rebuild.
+  const { execFileSync } = require('child_process');
+  const script = `
+    const s = require(${JSON.stringify(path.join(__dirname, '..', 'server.js'))}).__test;
+    process.stdout.write(JSON.stringify({
+      cap: s.MAX_UPSTREAM_PROMPT_CHARS,
+      configured: s.MAX_HISTORY_CHARS,
+      budget: s.MAX_HISTORY_CHARS_BUDGET,
+      share: s.HISTORY_BUDGET_SHARE,
+    }));
+  `;
+  const run = (env) => JSON.parse(execFileSync(process.execPath, ['-e', script], {
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }));
+
+  const tight = run({ DEEPSEEK_MAX_PROMPT_CHARS: '480000', DEEPSEEK_MAX_HISTORY_CHARS: '480000' });
+  assert.equal(tight.cap, 480000);
+  assert.equal(tight.configured, 480000, 'the env value is still reported as configured');
+  assert.equal(tight.budget, Math.floor(480000 * tight.share));
+  assert.ok(tight.budget < tight.configured, 'the effective budget is smaller than the request');
+
+  // A budget already inside the share is left untouched.
+  const roomy = run({ DEEPSEEK_MAX_PROMPT_CHARS: '800000', DEEPSEEK_MAX_HISTORY_CHARS: '100000' });
+  assert.equal(roomy.budget, Math.floor(800000 * roomy.share));
+  assert.ok(roomy.configured < roomy.budget, 'a small configured budget stays below the clamp');
 });

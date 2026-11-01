@@ -16,6 +16,14 @@ Setup only reads and writes files inside your home folder (or the project folder
 
 `--model` is always DeepSeek-V4.1-Flash, with native chat.deepseek.com search on for the live web. `-thinking` turns DeepThink on. `-nosearch` turns search off; the agent then keeps its own web tools. An old `-search` ID maps to the same ID without the suffix.
 
+### Context window the generated configs advertise
+
+Agent configs must declare a context window the proxy can actually deliver, because that number is what drives the client's own auto-compaction. The proxy caps the upstream prompt at `DEEPSEEK_MAX_PROMPT_CHARS` (800000 chars by default, `480000` in `local-stack`) and estimates 4 chars per token, so the honest figure is `cap / 4`: **200000 tokens** by default, **120000** with the local-stack cap.
+
+Generated OpenCode (`limit.context`) and Codex (`context_window` / `max_context_window`) configs use that figure. Earlier versions declared `1048576`, which is eight times more room than the proxy can forward: auto-compaction never fired, the client kept resending an ever-growing transcript, and `/admin/usage` reported the whole transcript as `prompt_tokens` while the proxy forwarded only a small delta. OpenClaw keeps its own more conservative `128000`.
+
+Re-run `npm run setup:agents -- --target <agent>` after changing `DEEPSEEK_MAX_PROMPT_CHARS` so the published window follows the cap.
+
 | Target | Added configuration | Selection |
 |---|---|---|
 | Claude Code | `~/.claude/freedeepseek.settings.json` | `claude --settings ~/.claude/freedeepseek.settings.json`; normal `claude` keeps native models |

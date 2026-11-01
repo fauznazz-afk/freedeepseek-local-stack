@@ -262,6 +262,27 @@ Batas jujur: ini **bukan** context window 1M token. Pemadatan bersifat
 ekstraktif (memilih & memotong), bukan abstraktif. Anchor berbasis regex, jadi
 format log tidak lazim bisa lolos tanpa anchor.
 
+### `prompt_tokens` bukan konsumsi DeepSeek
+
+`/admin/requests` dan `/admin/usage` melaporkan **dua** ukuran prompt, karena
+pada sesi sticky keduanya berbeda arti:
+
+| Field | Arti |
+|---|---|
+| `prompt_tokens` | Input **klien**: seluruh `messages[].content` yang dikirim, dibagi 4 |
+| `upstream_prompt_tokens` | Yang benar-benar dikirim proxy ke DeepSeek turn itu |
+| `upstream_prompt_chars` | Sama, dalam karakter |
+| `prompt_amplification` | `prompt_tokens / upstream_prompt_tokens` (agregat `/admin/usage`) |
+
+Angka besar itu normal, bukan bug: OpenCode, Codex, dan Claude Code mengirim ulang
+seluruh transkrip tiap turn, sementara sesi sticky hanya meneruskan delta baru.
+Rasio 4x berarti tiga perempat "prompt token" yang dilaporkan adalah konteks yang
+tidak pernah diterima model. Pakai `upstream_prompt_tokens` kalau ingin beban
+nyata ke DeepSeek.
+
+Tidak satu pun dari keduanya tagihan DeepSeek. Lane web tidak punya meter token,
+jadi `cached_tokens` selalu `0` dan `usd` hanya estimasi.
+
 ### Ledger memori sesi
 
 Kalau kompaksi membuang satu turn, path, perintah, dan error di dalamnya
@@ -296,7 +317,7 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 | Diagnosa | `npm run doctor` |
 | Tes unit | `node --test tests/unit.test.js` — 125 pass, 0 fail |
 | Tes inisiatif | `node --test tests/initiative*.test.js` - 18 pass, 0 fail |
-| Tes penuh | `npm test` - 376 pass, 13 fail (baseline) |
+| Tes penuh | `npm test` - 379 pass, 13 fail (baseline) |
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
 menjalankan proses kedua.
@@ -419,7 +440,7 @@ Nilai yang dipakai di mesin ini (dan di `settings.local.example.ps1`):
 | `DEEPSEEK_SESSION_TTL_MS` | `604800000` | Chat dipakai 7 hari sebelum diganti |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `400` | 400 pesan per chat sebelum reset paksa |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `400` | 400 giliran lokal diputar ulang |
-| `DEEPSEEK_MAX_HISTORY_CHARS` | `480000` | Anggaran karakter untuk replay |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Anggaran karakter untuk replay. Dipotong otomatis ke 35% plafon prompt |
 | `DEEPSEEK_MAX_PROMPT_CHARS` | `480000` | Plafon prompt ke upstream |
 | `DEEPSEEK_REQUEST_DEADLINE_MS` | `300000` | Deadline per request |
 | `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `30000` | Cooldown akun saat rate limit |
@@ -430,10 +451,13 @@ Dua hal yang wajib naik bersama: `DEEPSEEK_MAX_HISTORY_MESSAGES` dan
 diganti, replay dulu dipatok di 100 entri, jadi sesi "400 pesan" tetap hanya
 memulihkan 100 giliran terakhir.
 
-Anggaran karakter sengaja dipatok sama dengan plafon prompt (`480000`). Angka di
-atas batas prompt tidak menambah apa pun: prompt tetap dipotong, kelebihannya
-cuma jadi bahan pemadatan. Plafon 480000 (~128k token) dipilih dari log hidup:
-DeepSeek Web membalas 502 "Сервер занят" untuk prompt di atas ~500–760k karakter.
+Anggaran karakter replay dipotong otomatis ke 35% plafon prompt
+(`HISTORY_BUDGET_SHARE`). Dengan plafon `480000`, anggaran efektifnya `168000`
+karakter — angka di atas itu tidak menambah apa pun karena blok history memang
+hanya boleh memakai 35% prompt; kelebihannya cuma tersimpan lalu dipadatkan lagi
+setiap kali chat dibangun ulang. Plafon 480000 (~128k token) dipilih dari log
+hidup: DeepSeek Web membalas 502 "Сервер занят" untuk prompt di atas ~500–760k
+karakter.
 
 Cek hasilnya benar-benar aktif:
 
@@ -593,7 +617,7 @@ Dokumentasi protokol lengkap: [docs/api.md](docs/api.md) ·
 | `DEEPSEEK_SESSION_TTL_MS` | `7200000` | Lama satu chat dipakai ulang |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Pesan per chat sebelum reset paksa |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Giliran lokal diputar ulang ke chat pengganti |
-| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Anggaran karakter replay |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Anggaran karakter replay. Dipotong otomatis ke 35% plafon prompt |
 | `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Cap ledger memori per sesi |
 | `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Cap ledger memori proyek bersama. `0` = mati |
 | `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | Umur sesi idle di disk |
@@ -702,7 +726,7 @@ pakai field body `"agent_autonomy": true`.
 
 ```powershell
 node --test tests/unit.test.js     # 125 pass, 0 fail
-npm test                           # 376 pass, 13 fail
+npm test                           # 379 pass, 13 fail
 node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
 node --test tests/initiative*.test.js                                   # 18 pass, 0 fail
 ```

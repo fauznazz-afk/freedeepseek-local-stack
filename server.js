@@ -356,7 +356,14 @@ function unkeyedAgentId(remoteAddr, userAgent) {
 // depth still replays only the last 100 entries if MAX_HISTORY_LENGTH stays 100.
 // Defaults are unchanged so existing behaviour is identical unless opted in.
 const MAX_HISTORY_LENGTH = Math.max(2, Math.floor(envNumber('DEEPSEEK_MAX_HISTORY_MESSAGES', 100)));
-const MAX_HISTORY_CHARS = Math.max(1000, Math.floor(envNumber('DEEPSEEK_MAX_HISTORY_CHARS', 400000)));
+// The replay budget is not free-standing: buildBoundedPrompt only ever gives the
+// history block HISTORY_BUDGET_SHARE of the upstream prompt cap, so a larger
+// budget is storage that can never reach the model. Local-stack set both values
+// to 480000, which meant the history store could hold 100% of the prompt while
+// the builder would condense 65% of it away on every rebuild. The clamp itself
+// lives next to HISTORY_BUDGET_SHARE, once the prompt cap is known.
+const MAX_HISTORY_CHARS_CONFIGURED = Math.max(1000, Math.floor(envNumber('DEEPSEEK_MAX_HISTORY_CHARS', 400000)));
+const MAX_HISTORY_CHARS = MAX_HISTORY_CHARS_CONFIGURED;
 const HISTORY_ENTRY_PROMPT_CHARS = 12000;
 const HISTORY_ENTRY_ASSISTANT_CHARS = 12000;
 // Session lifetime. These bound the *remote* DeepSeek chat: when either limit is
@@ -437,6 +444,12 @@ const configuredPromptChars = Number(process.env.DEEPSEEK_MAX_PROMPT_CHARS);
 const MAX_UPSTREAM_PROMPT_CHARS = Number.isFinite(configuredPromptChars)
     ? Math.max(MIN_UPSTREAM_PROMPT_CHARS, Math.floor(configuredPromptChars))
     : 800000;
+// Cap the replay store at what the builder can actually spend. Without this the
+// env knob is a lie: local-stack set history and prompt cap both to 480000, so
+// the store could hold a full prompt's worth while buildBoundedPrompt condensed
+// 65% of it away on every rebuild - the agent paid storage for text that could
+// never reach the model.
+const MAX_HISTORY_CHARS_BUDGET = Math.max(1000, Math.floor(MAX_UPSTREAM_PROMPT_CHARS * HISTORY_BUDGET_SHARE));
 function buildBaseHeaders(config = DS_CONFIG) {
     return {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
@@ -800,12 +813,17 @@ const usageMinutes = new Map();  // minute start ms -> bucket
 let requestSeq = 0;
 let lifetimeUsage = newUsageCounters();
 function newUsageCounters() {
-    return { requests: 0, ok: 0, errors: 0, prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0, usd: 0, ms_total: 0 };
+    return { requests: 0, ok: 0, errors: 0, prompt_tokens: 0, upstream_prompt_tokens: 0, completion_tokens: 0, reasoning_tokens: 0, usd: 0, ms_total: 0 };
 }
 function addUsage(counters, entry) {
     counters.requests += 1;
     if (entry.ok) counters.ok += 1; else counters.errors += 1;
     counters.prompt_tokens += entry.prompt_tokens || 0;
+    // prompt_tokens is the CLIENT transcript size; upstream_prompt_tokens is what
+    // this proxy actually handed to DeepSeek. They differ by orders of magnitude
+    // for a sticky session (the client resends its whole transcript every turn,
+    // the proxy forwards only the new delta), so both are tracked separately.
+    counters.upstream_prompt_tokens += entry.upstream_prompt_tokens || 0;
     counters.completion_tokens += entry.completion_tokens || 0;
     counters.reasoning_tokens += entry.reasoning_tokens || 0;
     counters.usd += entry.usd || 0;
@@ -3540,6 +3558,18 @@ function sendOpenAIStream(res, openaiResp) {
     res.end();
 }
 
+// The newest slice of the client transcript: what this request actually added.
+// An agent client resends its whole conversation every turn, so storing that
+// verbatim made every history entry a near-copy of the one before it - 38 turns
+// of a real session held 468k chars of duplicated transcript, and the recovery
+// replay handed all of it back to the model on every reset. The delta is the
+// only part that is new, and it is what a replay actually needs.
+function newestTurnText(messages, options = {}) {
+    const delta = continuationMessages(messages);
+    if (!delta.length) return '';
+    return formatMessages(delta, [], options).prompt;
+}
+
 function storeHistory(agentId, prompt, content, toolCall) {
     const session = getOrCreateAgentSession(agentId);
     const calls = (Array.isArray(toolCall) ? toolCall : (toolCall ? [toolCall] : [])).filter(Boolean);
@@ -3554,8 +3584,11 @@ function storeHistory(agentId, prompt, content, toolCall) {
     const storedAssistant = contextLib.boundHistoryText(assistantResponse, HISTORY_ENTRY_ASSISTANT_CHARS);
     session.history.push({ user: storedPrompt, assistant: storedAssistant });
     while (session.history.length > MAX_HISTORY_LENGTH) session.history.shift();
+    // Clamp to what buildBoundedPrompt can actually spend on history, so the
+    // store never hoards transcript the builder would condense away anyway.
+    const historyBudget = Math.min(MAX_HISTORY_CHARS, MAX_HISTORY_CHARS_BUDGET);
     let historyChars = session.history.reduce((sum, e) => sum + e.user.length + e.assistant.length, 0);
-    while (historyChars > MAX_HISTORY_CHARS && session.history.length > 1) {
+    while (historyChars > historyBudget && session.history.length > 1) {
         const removed = session.history.shift();
         historyChars -= removed.user.length + removed.assistant.length;
     }
@@ -4284,6 +4317,10 @@ function adminRequestView(row) {
         local: row.local === true,
         ms: row.ms || 0,
         prompt_tokens: row.prompt_tokens || 0,
+        // What this proxy actually sent to DeepSeek for this turn. prompt_tokens
+        // above is the client transcript; for a sticky session the two differ a lot.
+        upstream_prompt_tokens: row.upstream_prompt_tokens || 0,
+        upstream_prompt_chars: row.upstream_prompt_chars || 0,
         completion_tokens: row.completion_tokens || 0,
         reasoning_tokens: row.reasoning_tokens || 0,
         usd: row.usd || 0,
@@ -4336,7 +4373,13 @@ const USAGE_BUCKETS = { '1m': 60 * 1000, '5m': 5 * 60 * 1000, '15m': 15 * 60 * 1
 const USAGE_DEFAULT_BUCKET = { '15m': '1m', '1h': '1m', '6h': '5m', '24h': '15m' };
 function usageCountersView(counters) {
     const { ms_total, ...rest } = counters;
-    return { ...rest, avg_ms: counters.requests ? Math.round(ms_total / counters.requests) : 0 };
+    // Client-side vs upstream prompt volume. A large ratio means the caller is
+    // resending a transcript the proxy is not forwarding (sticky delta), so the
+    // "prompt tokens" figure is mostly context the model never received.
+    const ratio = counters.prompt_tokens > 0 && counters.upstream_prompt_tokens > 0
+        ? Math.round((counters.prompt_tokens / counters.upstream_prompt_tokens) * 100) / 100
+        : null;
+    return { ...rest, prompt_amplification: ratio, avg_ms: counters.requests ? Math.round(ms_total / counters.requests) : 0 };
 }
 function sortedBreakdown(map) {
     return [...map.entries()]
@@ -5395,6 +5438,8 @@ async function handler(req, res) {
             stream: null,
             local: false,
             prompt_tokens: 0,
+            upstream_prompt_tokens: 0,
+            upstream_prompt_chars: 0,
             completion_tokens: 0,
             reasoning_tokens: 0,
             usd: 0,
@@ -6307,7 +6352,13 @@ async function handler(req, res) {
             }
 
             const executableCalls = toolCalls.length ? toolCalls : (toolCall ? [toolCall] : []);
-            storeHistory(agentId, prompt, fullContent, executableCalls);
+            // Store only the turn this request added. `prompt` is the whole
+            // formatted transcript; persisting that made every history entry a
+            // near-copy of the previous one (38 turns of one real session held
+            // 468k chars of duplicated transcript). The delta is the only new
+            // part, and it is what a recovery replay actually needs.
+            const turnText = newestTurnText(messages, promptOptions) || prompt;
+            storeHistory(agentId, turnText, fullContent, executableCalls);
 
             const openaiResponse = executableCalls.length
                 ? buildToolCallResponse(executableCalls, requestedModel, clientPromptText, reasoningContent)
@@ -6318,6 +6369,10 @@ async function handler(req, res) {
             logRow.account = session.accountId;
             recordAccountSuccess(accounts.find(a => a.id === session.accountId));
             logRow.prompt_tokens = openaiResponse.usage?.prompt_tokens || 0;
+            // The prompt actually sent upstream this turn (after sticky-delta
+            // reduction and compaction), not the client's transcript size.
+            logRow.upstream_prompt_chars = fullPrompt.length;
+            logRow.upstream_prompt_tokens = estimateTokens(fullPrompt);
             logRow.completion_tokens = openaiResponse.usage?.completion_tokens || 0;
             logRow.reasoning_tokens = openaiResponse.usage?.completion_tokens_details?.reasoning_tokens || 0;
             logRow.usd = modelCostUsd(requestedModel, logRow.prompt_tokens, logRow.completion_tokens);
@@ -6644,6 +6699,9 @@ module.exports = {
         MAX_SESSIONS_ON_DISK,
         MAX_HISTORY_LENGTH,
         MAX_HISTORY_CHARS,
+        MAX_HISTORY_CHARS_BUDGET,
+        MAX_UPSTREAM_PROMPT_CHARS,
+        HISTORY_BUDGET_SHARE,
         cooldownStore,
         COOLDOWNS_FILE_PATH,
         buildBoundedPrompt,
@@ -6686,6 +6744,7 @@ module.exports = {
         OPENCODE_AUTONOMY_INSTRUCTION,
         fingerprintPrompt,
         continuationMessages,
+        newestTurnText,
         sanitizeContent,
         buildUsage,
         extractScreenshotPaths,
