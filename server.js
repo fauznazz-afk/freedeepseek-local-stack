@@ -1644,7 +1644,18 @@ function emptyResponseNudge(searchEnabled) {
 // must look like steps (>=2 numbered lines, or an explicit "plan/rencana"), and
 // a reply that reports a finished result is never a plan.
 const PLAN_HEADER = /\b(?:rencana|plan|steps?|langkah)\b\s*:/i;
-const FINISHED_MARKER = /\b(?:selesai|beres|done|finished|completed|sudah (?:aku|saya) (?:ubah|perbaiki|jalankan|tes)|tests? (?:pass|lulus))\b/i;
+// Ported from upstream #67. The old \b-wordlist missed non-Latin scripts, because
+// JS \b does not treat them as word characters. This version reads any language:
+// a short reply with real letters and sentence punctuation is a final answer.
+function looksLikeFinalAnswer(text) {
+    const value = String(text || '');
+    if (/(?<![\p{L}\p{N}_])(?:done|completed|fixed|finished|готово|сделано)(?![\p{L}\p{N}_])/iu.test(value)) return true;
+    const letters = value.match(/\p{L}/gu);
+    if (!letters || letters.length < 6) return false;
+    return /[.!?…]|[。！？｡．؟۔।॥]/u.test(value);
+}
+const FINISHED_MARKER = { test: (text) => looksLikeFinalAnswer(text) };
+const ENGLISH_FINISHED_MARKER = /\b(?:selesai|beres|done|finished|completed|sudah (?:aku|saya) (?:ubah|perbaiki|jalankan|tes)|tests? (?:pass|lulus))\b/i;
 function looksLikeUnstartedPlan(text) {
     const value = String(text || '').trim();
     if (!value || value.length >= 1200) return false;
@@ -1654,7 +1665,9 @@ function looksLikeUnstartedPlan(text) {
     const numbered = lines.filter(l => /^(?:\d+[.)]|[-*])\s+\S/.test(l)).length;
     const hasHeader = PLAN_HEADER.test(value);
     if (!hasHeader && numbered < 2) return false;
-    if (FINISHED_MARKER.test(value)) return false;
+    // A plan ends with the last step, not with sentence punctuation, so the
+    // multilingual final-answer test cannot veto it here.
+    if (ENGLISH_FINISHED_MARKER.test(value)) return false;
     return true;
 }
 function planNudge() {
