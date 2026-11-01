@@ -317,7 +317,7 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 | Diagnosa | `npm run doctor` |
 | Tes unit | `node --test tests/unit.test.js` — 125 pass, 0 fail |
 | Tes inisiatif | `node --test tests/initiative*.test.js` - 18 pass, 0 fail |
-| Tes penuh | `npm test` - 380 pass, 13 fail (baseline) |
+| Tes penuh | `npm test` - 388 pass, 13 fail (baseline) |
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
 menjalankan proses kedua.
@@ -441,6 +441,7 @@ Nilai yang dipakai di mesin ini (dan di `settings.local.example.ps1`):
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `400` | 400 pesan per chat sebelum reset paksa |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `400` | 400 giliran lokal diputar ulang |
 | `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Anggaran karakter untuk replay. Dipotong otomatis ke 35% plafon prompt |
+| `DEEPSEEK_AUTO_COMPACT` | on | Saat riwayat melebihi anggaran, fakta dari giliran terlama (path, perintah, error) disimpan dulu ke ledger sebelum dibuang. `0` = trim lama yang lossy |
 | `DEEPSEEK_MAX_PROMPT_CHARS` | `480000` | Plafon prompt ke upstream |
 | `DEEPSEEK_REQUEST_DEADLINE_MS` | `300000` | Deadline per request |
 | `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `30000` | Cooldown akun saat rate limit |
@@ -458,6 +459,23 @@ hanya boleh memakai 35% prompt; kelebihannya cuma tersimpan lalu dipadatkan lagi
 setiap kali chat dibangun ulang. Plafon 480000 (~128k token) dipilih dari log
 hidup: DeepSeek Web membalas 502 "Сервер занят" untuk prompt di atas ~500–760k
 karakter.
+
+### Auto-compact
+
+Saat riwayat melewati anggaran di atas, giliran tertua dibuang. Dulu itu
+`shift()` biasa: path, perintah, dan pesan error dari giliran awal ikut hilang,
+jadi sesi yang sudah lama berjalan justru tahu lebih sedikit daripada sesi baru.
+Sekarang sebelum dibuang, fakta-fakta itu dipanen ke ledger sesi
+(`memory` / `decisions`), sehingga tetap terbawa saat chat diganti. Fitur ini
+aktif secara default; matikan dengan `DEEPSEEK_AUTO_COMPACT=0`.
+
+Giliran terbaru tidak pernah dibuang, dan hasilnya bisa dilihat per agent:
+
+```bash
+curl -sS http://127.0.0.1:9655/v1/sessions
+# {"agents":[{"agent":"...","history_size":12,"history_chars":24320,
+#            "compactions":3,"last_compacted_at":1762000000000}]}
+```
 
 Cek hasilnya benar-benar aktif:
 
@@ -572,7 +590,7 @@ ID lama tidak terdaftar dan mengembalikan `400 invalid_model`:
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/messages` | Anthropic Messages |
 | `POST` | `/v1/responses` | OpenAI Responses |
-| `GET` | `/v1/sessions` | Sesi agent lokal |
+| `GET` | `/v1/sessions` | Sesi agent lokal: `history_size`, `history_chars`, `compactions`, `last_compacted_at` |
 | `POST` | `/reset-session?agent=<id>` | Buang satu chat Web |
 | `POST` | `/reset-session?agent=all` | Buang semua chat Web |
 
@@ -618,6 +636,7 @@ Dokumentasi protokol lengkap: [docs/api.md](docs/api.md) ·
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Pesan per chat sebelum reset paksa |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Giliran lokal diputar ulang ke chat pengganti |
 | `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Anggaran karakter replay. Dipotong otomatis ke 35% plafon prompt |
+| `DEEPSEEK_AUTO_COMPACT` | on | Auto-compact: fakta giliran yang dibuang disimpan ke ledger sesi lebih dulu. `0` = mati |
 | `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Cap ledger memori per sesi |
 | `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Cap ledger memori proyek bersama. `0` = mati |
 | `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | Umur sesi idle di disk |
@@ -726,7 +745,7 @@ pakai field body `"agent_autonomy": true`.
 
 ```powershell
 node --test tests/unit.test.js     # 125 pass, 0 fail
-npm test                           # 380 pass, 13 fail
+npm test                           # 388 pass, 13 fail
 node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
 node --test tests/initiative*.test.js                                   # 18 pass, 0 fail
 ```

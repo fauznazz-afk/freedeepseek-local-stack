@@ -25,7 +25,7 @@ This is a **Web-session** API, not `api.deepseek.com`. One DeepSeek login can se
 | POST | `/admin/agents/backups/<id>/restore` | admin, local only | Put a restore point back |
 | GET | `/v1/models` | proxy key if set | OpenAI model list |
 | GET | `/v1/model-capabilities` | proxy key if set | DeepSeek-V4.1-Flash IDs. Native chat.deepseek.com search is on by default. `-thinking` is DeepThink. `-nosearch` turns search off |
-| GET | `/v1/sessions` | proxy key if set | Sticky agent sessions |
+| GET | `/v1/sessions` | proxy key if set | Sticky agent sessions. Each row has `history_size`, `history_chars`, `compactions` and `last_compacted_at` |
 | POST | `/v1/chat/completions` | proxy key if set | OpenAI Chat Completions (`stream` true\|false) |
 | POST | `/v1/messages` | proxy key if set | Anthropic Messages |
 | POST | `/v1/responses` | proxy key if set | OpenAI Responses |
@@ -51,6 +51,12 @@ curl -sS http://127.0.0.1:9655/v1/chat/completions \
 Clients without `x-agent-session` (or `user`) get a stable `unkeyed-<hash>` session per remote address + User-Agent, so unrelated clients never share one chat. Overlapping real chats on one login wait in a per-account queue (`DEEPSEEK_ACCOUNT_LOCK_WAIT_MS`, default matches the request deadline). OpenCode session-title completions are answered locally and do not occupy the login.
 
 On a live sticky Web chat the proxy sends the system prompt and tool list **once**. Later OpenCode / Claude Code / Codex turns omit that system blob and replayed history; only the new user/tool turn goes upstream. A changed system prompt is sent again. Remote session reset (TTL, `/new`, empty-response retry) sends the full prompt.
+
+### Auto-compaction
+
+The proxy keeps its own copy of the conversation so a reset chat can be replayed. That copy is trimmed from the oldest end when it outgrows `DEEPSEEK_MAX_HISTORY_MESSAGES` or the effective `DEEPSEEK_MAX_HISTORY_CHARS` budget. Before a turn is dropped, its paths, commands, error lines and stated decisions are banked into the session ledger (`memory` / `decisions`, capped by `DEEPSEEK_MAX_MEMORY_CHARS`), so a long session does not forget its earliest facts. This is on by default; `DEEPSEEK_AUTO_COMPACT=0` restores the old trim that dropped turns silently.
+
+`GET /v1/sessions` reports the result per agent: `history_size` and `history_chars` (what is stored now), plus `compactions` and `last_compacted_at`. The newest turn is never evicted, so a single oversized turn stays until a newer one arrives.
 
 OpenCode's bundled prompt is kept, but token-economy / "ask first" lines are rewritten for DeepSeek Web: finish the task autonomously and do not ask clarifying questions. `npm run setup:agents -- --target opencode` writes the same rule to `~/.config/opencode/AGENTS.md`.
 
@@ -283,7 +289,9 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 | `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one Web chat is reused before a fresh one is opened |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Messages per chat before a forced reset. Minimum 2 |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Local turns replayed into a replacement chat. Raise with `MAX_MESSAGE_DEPTH` |
-| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Char budget for that replay. Minimum 1000. Clamped at runtime to 35% of `DEEPSEEK_MAX_PROMPT_CHARS` (`HISTORY_BUDGET_SHARE`) || `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Per-session ledger of dropped paths, commands and errors |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Char budget for that replay. Minimum 1000. Clamped at runtime to 35% of `DEEPSEEK_MAX_PROMPT_CHARS` (`HISTORY_BUDGET_SHARE`) |
+| `DEEPSEEK_AUTO_COMPACT` | on | When the stored history overflows its budget, bank the evicted turns' paths, commands and errors into the session ledger before dropping them. `0`, `false`, `off`, `no` restore the old lossy trim |
+| `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Per-session ledger of dropped paths, commands and errors |
 | `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Shared project ledger inherited by new agent keys. `0` = off |
 | `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | How long an idle session survives on disk |
 | `DEEPSEEK_MAX_SESSIONS` | `500` | Session cap loaded from disk at startup |

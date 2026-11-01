@@ -218,6 +218,30 @@ test('/health reports the effective replay budget, not just the configured one',
   assert.ok(reuse.replay_chars <= reuse.replay_chars_configured, 'the effective budget never exceeds the configured one');
 });
 
+test('/v1/sessions exposes the compaction record so a trimmed session is visible', async (t) => {
+  // Auto-compaction happens inside storeHistory, out of sight. Without a field in
+  // /v1/sessions there is no way to tell a session that has been compacted twelve
+  // times from one that has never overflowed.
+  const agent = 'sessions-compaction-probe';
+  const session = S.createSession();
+  Object.assign(session, { id: 'sess-compact', accountId: 'a1', createdAt: Date.now(), messageCount: 5 });
+  session.history.push({ user: 'x'.repeat(50), assistant: 'y'.repeat(50) });
+  session.compactions = 12;
+  session.lastCompactedAt = 1700000000000;
+  S.sessions.set(agent, session);
+  t.after(() => { S.sessions.delete(agent); });
+
+  const port = await startServer(t);
+  const res = await request(port, 'GET', '/v1/sessions');
+  assert.equal(res.status, 200, res.text);
+  const row = res.json.agents.find(a => a.agent === agent);
+  assert.ok(row, 'the session appears in the list');
+  assert.equal(row.compactions, 12, 'the compaction count is published');
+  assert.equal(row.last_compacted_at, 1700000000000, 'the timestamp is published');
+  assert.equal(row.history_chars, 100, 'the stored transcript size is published');
+  assert.equal(row.history_size, 1, 'the existing entry count is unchanged');
+});
+
 test('a rate-limit signal is never classified as context-too-long', () => {
   assert.equal(S.isContextTooLongError('Prompt rate limit exceeded'), false);
   assert.equal(S.isContextTooLongError({ content: RATE_TEXT, finish_reason: 'rate_limit_reached' }), false);

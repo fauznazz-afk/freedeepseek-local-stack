@@ -2368,6 +2368,188 @@ test('a single-turn request still stores its prompt when no delta exists', () =>
   assert.match(fallback, /hello there/);
 });
 
+// --- Auto-compaction -------------------------------------------------------
+// History is trimmed from the front once it outgrows its budget. That trim used
+// to be a bare shift(), so a long session quietly forgot the paths, commands and
+// errors of its earliest turns - it knew less than a session that had just
+// started. compactHistory harvests those anchors into the session ledger first.
+
+function sessionWithTurns(turns) {
+  const session = serverInternals.createSession();
+  for (const turn of turns) session.history.push({ user: turn.user, assistant: turn.assistant });
+  return session;
+}
+
+test('auto-compact banks the facts of evicted turns before dropping them', () => {
+  const turns = [];
+  for (let i = 0; i < 6; i++) {
+    turns.push({
+      user: `turn ${i}: open C:\\repo\\src\\file${i}.js and run npm test --filter case${i}\n` + 'x'.repeat(300),
+      assistant: 'done',
+    });
+  }
+  const session = sessionWithTurns(turns);
+  const before = session.history.length;
+
+  // A 1000-char budget (the floor) forces the oldest turns out.
+  const dropped = serverInternals.compactHistory(session, 1000, 100);
+
+  assert.ok(dropped > 0, 'the overflow must actually evict entries');
+  assert.equal(session.history.length, before - dropped, 'history shrinks by exactly what was dropped');
+  assert.ok(session.history.length >= 1, 'the newest turn is always kept');
+  assert.equal(session.compactions, 1, 'one compaction is recorded');
+  assert.ok(session.lastCompactedAt > 0, 'the compaction is timestamped');
+
+  // The evicted turns are gone from history...
+  const remaining = session.history.map(e => e.user).join('\n');
+  assert.doesNotMatch(remaining, /file0\.js/, 'the oldest turn left the transcript');
+
+  // ...but their anchors survived in the ledger.
+  const banked = session.memory.join('\n');
+  assert.match(banked, /file0\.js/, 'a dropped path is banked');
+  assert.match(banked, /npm test --filter case0/, 'a dropped command is banked');
+});
+
+test('auto-compact never drops the last turn, even under a tiny budget', () => {
+  const session = sessionWithTurns([{ user: 'u'.repeat(5000), assistant: 'a'.repeat(5000) }]);
+  const dropped = serverInternals.compactHistory(session, 1000, 100);
+  assert.equal(dropped, 0, 'a single turn is not evicted');
+  assert.equal(session.history.length, 1);
+  assert.equal(session.compactions, 0, 'nothing was compacted, so nothing is counted');
+});
+
+test('auto-compact enforces the count budget, not just the char budget', () => {
+  const turns = [];
+  for (let i = 0; i < 10; i++) turns.push({ user: `u${i}`, assistant: `a${i}` });
+  const session = sessionWithTurns(turns);
+  serverInternals.compactHistory(session, 10_000_000, 3);
+  assert.equal(session.history.length, 3, 'the entry cap is honoured');
+  assert.deepEqual(session.history.map(e => e.user), ['u7', 'u8', 'u9'], 'the oldest entries are the ones dropped');
+});
+
+test('DEEPSEEK_AUTO_COMPACT=0 restores the old lossy trim', () => {
+  // The escape hatch has to be real: with it off the trim must still happen, but
+  // nothing is banked. Otherwise "disable compaction" would silently keep the
+  // transcript growing.
+  const { execFileSync } = require('child_process');
+  const script = `
+    const s = require(${JSON.stringify(path.join(__dirname, '..', 'server.js'))}).__test;
+    const session = s.createSession();
+    for (let i = 0; i < 6; i++) {
+      session.history.push({ user: 'turn ' + i + ': C:\\\\repo\\\\src\\\\file' + i + '.js ' + 'x'.repeat(300), assistant: 'done' });
+    }
+    const dropped = s.compactHistory(session, 1000, 100);
+    process.stdout.write(JSON.stringify({
+      enabled: s.AUTO_COMPACT_ENABLED,
+      dropped,
+      kept: session.history.length,
+      memory: session.memory,
+      compactions: session.compactions || 0,
+      lastCompactedAt: session.lastCompactedAt || null,
+    }));
+  `;
+  const run = (env) => {
+    const out = execFileSync(process.execPath, ['-e', script], {
+      env: { ...process.env, ...env },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    // The proxy logs each compaction on stdout, so the JSON is the last line.
+    return JSON.parse(out.trim().split(/\r?\n/).pop());
+  };
+
+  const off = run({ DEEPSEEK_AUTO_COMPACT: '0' });
+  assert.equal(off.enabled, false, 'the flag reads as disabled');
+  assert.ok(off.dropped > 0, 'the trim still happens');
+  assert.ok(off.kept < 6, 'history is still clamped');
+  assert.deepEqual(off.memory, [], 'nothing is banked when the feature is off');
+  assert.equal(off.compactions, 0, 'no compaction is counted');
+  assert.equal(off.lastCompactedAt, null);
+
+  const on = run({ DEEPSEEK_AUTO_COMPACT: '1' });
+  assert.equal(on.enabled, true);
+  assert.ok(on.memory.length > 0, 'the same run banks facts when enabled');
+  assert.equal(on.compactions, 1);
+});
+
+test('the compaction counters are persisted with the session', () => {
+  // A counter that resets on restart is not a counter: /v1/sessions would report
+  // zero compactions for a session that had been trimmed many times.
+  const session = serverInternals.createSession();
+  session.messageCount = 1;
+  session.history.push({ user: 'u', assistant: 'a' });
+  session.compactions = 7;
+  session.lastCompactedAt = 1700000000000;
+  serverInternals.sessions.set('autocompact-persist-probe', session);
+  try {
+    const saved = serverInternals.serializeSessions()['autocompact-persist-probe'];
+    assert.ok(saved, 'the session is serialized');
+    assert.equal(saved.compactions, 7, 'the compaction count survives serialization');
+    assert.equal(saved.lastCompactedAt, 1700000000000, 'the timestamp survives serialization');
+  } finally {
+    serverInternals.sessions.delete('autocompact-persist-probe');
+  }
+});
+
+test('a fresh session starts with a clean compaction record', () => {
+  const session = serverInternals.createSession();
+  assert.equal(session.compactions, 0);
+  assert.equal(session.lastCompactedAt, null);
+});
+
+test('loadSessions restores the compaction record from disk', () => {
+  // serializeSessions writing the fields is only half the promise: if loadSessions
+  // does not read them back, every restart resets the count to zero and the field
+  // is decoration. Boot a throwaway copy of the server against a planted file.
+  const { execFileSync } = require('child_process');
+  const tmp = tmpdir();
+  fs.mkdirSync(path.join(tmp, 'data'), { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'server.js'), path.join(tmp, 'server.js'));
+  fs.cpSync(path.join(ROOT, 'lib'), path.join(tmp, 'lib'), { recursive: true });
+  fs.cpSync(path.join(ROOT, 'scripts'), path.join(tmp, 'scripts'), { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'package.json'), path.join(tmp, 'package.json'));
+
+  const stamp = 1700000000000;
+  fs.writeFileSync(path.join(tmp, 'data', 'sessions.json'), JSON.stringify({
+    'restart-probe': {
+      id: 'remote-chat-1',
+      messageCount: 40,
+      accountId: 'akun1',
+      history: [{ user: 'u', assistant: 'a' }],
+      memory: ['C:\\repo\\src\\kept.js'],
+      decisions: [],
+      compactions: 5,
+      lastCompactedAt: stamp,
+      lastActivityAt: Date.now(),
+    },
+  }), 'utf8');
+
+  const script = `
+    const s = require(${JSON.stringify(path.join(tmp, 'server.js'))}).__test;
+    s.loadSessions();
+    const session = s.sessions.get('restart-probe');
+    process.stdout.write(JSON.stringify({
+      loaded: Boolean(session),
+      compactions: session ? session.compactions : null,
+      lastCompactedAt: session ? session.lastCompactedAt : null,
+      memory: session ? session.memory : null,
+    }));
+  `;
+  const out = execFileSync(process.execPath, ['-e', script], {
+    cwd: tmp,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, DEEPSEEK_AUTH_DIR: path.join(tmp, 'accounts'), NON_INTERACTIVE: '1' },
+  });
+  const loaded = JSON.parse(out.trim().split(/\r?\n/).pop());
+
+  assert.equal(loaded.loaded, true, 'the session is read from disk');
+  assert.equal(loaded.compactions, 5, 'the compaction count is restored');
+  assert.equal(loaded.lastCompactedAt, stamp, 'the timestamp is restored');
+  assert.deepEqual(loaded.memory, ['C:\\repo\\src\\kept.js'], 'the banked ledger comes back too');
+});
+
+
 test('audit srv-tools-4: extractScreenshotPaths does not throw on tool messages with array content', () => {
   const { extractScreenshotPaths } = serverInternals;
   let result;

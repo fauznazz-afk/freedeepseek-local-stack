@@ -254,6 +254,8 @@ function serializeSessions() {
             history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
             memory: Array.isArray(session.memory) ? session.memory : [],
             decisions: Array.isArray(session.decisions) ? session.decisions : [],
+            compactions: session.compactions || 0,
+            lastCompactedAt: session.lastCompactedAt || null,
             sentSystemFingerprint: session.sentSystemFingerprint || null,
             conversationKey: session.conversationKey || null,
             lastActivityAt: session.lastActivityAt || Date.now(),
@@ -316,6 +318,8 @@ function loadSessions() {
                 history: Array.isArray(session.history) ? session.history.slice(-MAX_MESSAGE_DEPTH) : [],
                 memory: Array.isArray(session.memory) ? session.memory : [],
                 decisions: Array.isArray(session.decisions) ? session.decisions : [],
+                compactions: session.compactions || 0,
+                lastCompactedAt: session.lastCompactedAt || null,
                 sentSystemFingerprint: session.sentSystemFingerprint || null,
                 conversationKey: session.conversationKey || null,
                 lastActivityAt: session.lastActivityAt || now,
@@ -388,6 +392,11 @@ const MAX_SESSIONS_ON_DISK = Math.max(1, Math.floor(envNumber('DEEPSEEK_MAX_SESS
 // after its transcript has been forced through the context cap multiple times.
 const MAX_SESSION_MEMORY_CHARS = Math.max(1000, Math.floor(envNumber('DEEPSEEK_MAX_MEMORY_CHARS', 16000)));
 const MAX_SESSION_DECISIONS_CHARS = 4000;
+// Auto-compaction of the replay history. When the stored transcript outgrows its
+// budget, the evicted turns are harvested into the session ledger before they are
+// dropped, so their paths, commands and errors survive the trim. Set
+// DEEPSEEK_AUTO_COMPACT=0 to fall back to the old lossy shift().
+const AUTO_COMPACT_ENABLED = !/^(?:0|false|off|no)$/i.test(String(process.env.DEEPSEEK_AUTO_COMPACT ?? '').trim());
 const SESSION_MEMORY_HEADER = '[Session memory: facts (paths, commands, errors) preserved from earlier turns that were dropped from this transcript.]';
 
 // === DeepSeek Web API Config — loaded from external config file ===
@@ -1079,6 +1088,9 @@ function createSession() {
         accountId: null,
         history: [],
         memory: [],
+        decisions: [],
+        compactions: 0,
+        lastCompactedAt: null,
         sentSystemFingerprint: null,
         conversationKey: null,
         emptyStreak: 0,
@@ -3570,6 +3582,42 @@ function newestTurnText(messages, options = {}) {
     return formatMessages(delta, [], options).prompt;
 }
 
+// Automatic history compaction.
+//
+// History is trimmed from the front whenever it outgrows its count or char
+// budget. That trim used to be a plain shift(): the turn's paths, commands and
+// error lines went with it, so a session that had been running long enough to
+// overflow knew less than one that had just started. The ledger exists exactly
+// for this - harvest the evicted turns into session.memory (and the shared
+// ledger) before dropping them, and the facts survive the transcript.
+//
+// Returns the number of entries dropped so the caller can report it.
+function compactHistory(session, budgetChars, maxEntries) {
+    if (!session || !Array.isArray(session.history)) return 0;
+    const budget = Math.max(1000, Math.floor(Number(budgetChars) || 0));
+    const maxCount = Math.max(2, Math.floor(Number(maxEntries) || MAX_HISTORY_LENGTH));
+    const sizeOf = (entry) => String(entry?.user || '').length + String(entry?.assistant || '').length;
+    let chars = session.history.reduce((sum, entry) => sum + sizeOf(entry), 0);
+    let dropped = 0;
+    const evicted = [];
+    while ((session.history.length > maxCount || chars > budget) && session.history.length > 1) {
+        const removed = session.history.shift();
+        chars -= sizeOf(removed);
+        evicted.push(removed);
+        dropped++;
+    }
+    if (dropped > 0 && AUTO_COMPACT_ENABLED) {
+        const text = evicted
+            .map(entry => `User: ${String(entry?.user || '')}\nAssistant: ${String(entry?.assistant || '')}`)
+            .join('\n\n');
+        const added = harvestSessionMemory(session, text);
+        session.compactions = (session.compactions || 0) + 1;
+        session.lastCompactedAt = Date.now();
+        console.log(`[compact] agent history trimmed: -${dropped} entr${dropped === 1 ? 'y' : 'ies'}, ${chars} chars left, +${added} banked fact(s)`);
+    }
+    return dropped;
+}
+
 function storeHistory(agentId, prompt, content, toolCall) {
     const session = getOrCreateAgentSession(agentId);
     const calls = (Array.isArray(toolCall) ? toolCall : (toolCall ? [toolCall] : [])).filter(Boolean);
@@ -3583,15 +3631,10 @@ function storeHistory(agentId, prompt, content, toolCall) {
     const storedPrompt = contextLib.boundHistoryText(prompt, HISTORY_ENTRY_PROMPT_CHARS);
     const storedAssistant = contextLib.boundHistoryText(assistantResponse, HISTORY_ENTRY_ASSISTANT_CHARS);
     session.history.push({ user: storedPrompt, assistant: storedAssistant });
-    while (session.history.length > MAX_HISTORY_LENGTH) session.history.shift();
     // Clamp to what buildBoundedPrompt can actually spend on history, so the
     // store never hoards transcript the builder would condense away anyway.
-    const historyBudget = Math.min(MAX_HISTORY_CHARS, MAX_HISTORY_CHARS_BUDGET);
-    let historyChars = session.history.reduce((sum, e) => sum + e.user.length + e.assistant.length, 0);
-    while (historyChars > historyBudget && session.history.length > 1) {
-        const removed = session.history.shift();
-        historyChars -= removed.user.length + removed.assistant.length;
-    }
+    // Facts from the evicted turns are banked first (see compactHistory).
+    compactHistory(session, Math.min(MAX_HISTORY_CHARS, MAX_HISTORY_CHARS_BUDGET), MAX_HISTORY_LENGTH);
 }
 
 // Extract MEDIA: paths from the current turn's tool results (the tool messages after
@@ -5332,6 +5375,11 @@ async function handler(req, res) {
                 message_count: session.messageCount,
                 account: session.accountId,
                 history_size: session.history.length,
+                history_chars: Array.isArray(session.history)
+                    ? session.history.reduce((sum, e) => sum + String(e?.user || '').length + String(e?.assistant || '').length, 0)
+                    : 0,
+                compactions: session.compactions || 0,
+                last_compacted_at: session.lastCompactedAt || null,
                 age_min: session.createdAt ? Math.round((Date.now() - session.createdAt) / 60000) : 0,
             });
         }
@@ -6702,6 +6750,10 @@ module.exports = {
         MAX_HISTORY_CHARS_BUDGET,
         MAX_UPSTREAM_PROMPT_CHARS,
         HISTORY_BUDGET_SHARE,
+        AUTO_COMPACT_ENABLED,
+        compactHistory,
+        serializeSessions,
+        loadSessions,
         cooldownStore,
         COOLDOWNS_FILE_PATH,
         buildBoundedPrompt,
