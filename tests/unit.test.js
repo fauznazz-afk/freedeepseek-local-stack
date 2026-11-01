@@ -2658,6 +2658,54 @@ test('conversation key comparison ignores assistant and tool messages', () => {
   assert.equal(serverInternals.conversationFingerprint([]), null);
 });
 
+test('the banked opening request is the real task, not a greeting or preamble', () => {
+  // Banking evicted[0] verbatim stored "hi" or "You are a coding agent." and lost
+  // the actual instruction, which is the whole point of the field.
+  const cases = [
+    { turns: ['TASK: refactor the payment module', 'continue'], expect: /refactor the payment module/ },
+    { turns: ['hi', 'TASK: refactor the payment module to use the new API'], expect: /refactor the payment module/ },
+    { turns: ['You are a coding agent.', 'TASK: refactor the payment module'], expect: /refactor the payment module/ },
+    { turns: ['ok', 'lanjut', 'TASK: refactor the payment module'], expect: /refactor the payment module/ },
+  ];
+  for (const c of cases) {
+    const session = serverInternals.createSession();
+    for (const turn of c.turns) session.history.push({ user: turn, assistant: 'ok' });
+    for (let i = 0; i < 60; i++) {
+      session.history.push({ user: `step ${i} C:\\repo\\src\\f${i}.js ` + 'z'.repeat(4000), assistant: 'ok' });
+    }
+    serverInternals.compactHistory(session, 168000, serverInternals.MAX_HISTORY_LENGTH);
+    assert.match(session.openingRequest || '', c.expect,
+      `opening request must carry the task for turns ${JSON.stringify(c.turns)}`);
+  }
+});
+
+test('the ledger cap stays cheap once the ledger is full', () => {
+  // Regression: the redundancy check used to be one String.includes() per memory
+  // line over the whole transcript - 800 lines x 166k chars = 23 ms per call, and
+  // it runs on EVERY request once the ledger is full. A 2000-turn session took
+  // 25 seconds of pure bookkeeping. The indexed version is ~0.2 ms.
+  const session = serverInternals.createSession();
+  for (let i = 0; i < 60; i++) {
+    session.history.push({ user: `turn ${i} C:\\repo\\src\\f${i}.js ` + 'z'.repeat(3000), assistant: 'ok' });
+  }
+  session.memory = [];
+  for (let i = 0; i < 900; i++) session.memory.push(`C:\\gone\\deep\\path\\entry\\number${i}.js`);
+
+  // Warm past the cap so every subsequent harvest takes the eviction path.
+  serverInternals.harvestSessionMemory(session, 'C:\\warm\\up.js');
+  assert.ok(session.memory.reduce((n, l) => n + l.length + 1, 0) <= serverInternals.MAX_SESSION_MEMORY_CHARS,
+    'the fixture is at the cap');
+
+  const started = process.hrtime.bigint();
+  for (let i = 0; i < 100; i++) {
+    serverInternals.harvestSessionMemory(session, `C:\\repo\\src\\fresh${i}.js`);
+  }
+  const perCall = Number(process.hrtime.bigint() - started) / 1e6 / 100;
+  assert.ok(perCall < 5, `harvest at the cap must stay cheap, got ${perCall.toFixed(2)} ms/call`);
+  assert.ok(session.memory.reduce((n, l) => n + l.length + 1, 0) <= serverInternals.MAX_SESSION_MEMORY_CHARS,
+    'the cap is still enforced');
+});
+
 test('loadSessions restores the compaction record from disk', () => {
   // serializeSessions writing the fields is only half the promise: if loadSessions
   // does not read them back, every restart resets the count to zero and the field

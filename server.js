@@ -3858,15 +3858,25 @@ function harvestSessionMemory(session, droppedText) {
             // earliest work - a 900-turn session ended up unable to name a single
             // file from its first 100 steps. Only fall back to dropping the
             // oldest when every line is still present in the history.
+            //
+            // Cost note: the obvious version (memory.filter(l => historyText
+            // .includes(l))) is 800 lines x 166k chars and measured 23 ms per
+            // call, which is paid on EVERY request once the ledger is full - it
+            // turned a 17 ms / 200-turn workload into 25 s. An indexed lookup is
+            // a single pass over the history instead.
             const historyText = session.history
                 .map(e => `${String(e?.user || '')}\n${String(e?.assistant || '')}`)
                 .join('\n');
-            const inHistory = (line) => line.length > 0 && historyText.includes(line);
+            const historyLines = new Set(historyText.split('\n'));
+            const isRedundant = (line) => line.length > 0 && historyLines.has(line);
+            let redundantFlags = session.memory.map(isRedundant);
+            let nextRedundant = redundantFlags.indexOf(true);
             while (size > MAX_SESSION_MEMORY_CHARS && session.memory.length > 1) {
-                const redundant = session.memory.findIndex(inHistory);
-                const victim = redundant >= 0 ? redundant : 0;
+                const victim = nextRedundant >= 0 ? nextRedundant : 0;
                 size -= session.memory[victim].length + 1;
                 session.memory.splice(victim, 1);
+                redundantFlags.splice(victim, 1);
+                nextRedundant = redundantFlags.indexOf(true);
             }
         }
         session.memory = session.memory.slice(-800);
@@ -3891,25 +3901,44 @@ function harvestSessionMemory(session, droppedText) {
     return added;
 }
 // The opening request is prose, so extractAnchors never sees it - and the turn
-// carrying it is the first thing compaction evicts. A 900-turn session could not
-// answer "what was I asked to do" once that happened. Bank the request from the
-// first surviving turn the first time compaction evicts the opening turn, so the
-// task statement outlives the transcript. Returns true when something was banked.
+// carrying it is the first thing compaction evicts. Bank the request from the
+// evicted turns so the task statement outlives the transcript.
+//
+// "First user turn" is not good enough: agents often open with a greeting or a
+// boilerplate preamble, so banking evicted[0] stored "hi" or "You are a coding
+// agent." and the real task was lost anyway. Prefer the first evicted turn that
+// reads like an actual instruction.
 function bankOpeningRequest(session, evicted) {
     if (!session || !Array.isArray(evicted) || evicted.length === 0) return false;
     if (session.openingRequest) return false; // banked once, keep the original
-    if (!Array.isArray(session.history) || session.history.length === 0) return false;
+    if (!Array.isArray(session.history)) return false;
     // History entries are stored as formatted prompt text, so strip the envelope
     // ("User: ", "Assistant: ") before banking the request itself.
     const clean = (text) => String(text || '')
         .replace(/^\s*(?:User|Assistant|System|Tool)\s*:\s*/i, '')
         .trim();
-    // A tool-result envelope is not a task statement; skip it and use the first
-    // surviving turn that reads like prose.
-    const looksLikeTask = (text) => text.length >= 8 && !/^\[(?:Tool Result|Tool|Recovery)/i.test(text);
-    let source = clean(evicted[0]?.user);
-    if (!looksLikeTask(source)) {
-        source = '';
+    const isToolEnvelope = (text) => /^\[(?:Tool Result|Tool|Recovery)/i.test(text);
+    // A greeting or a one-word acknowledgement is not the task.
+    const isFiller = (text) => /^(?:hi|hey|hello|halo|hai|ok|okay|sure|thanks|thank you|lanjut|continue|go on|proceed|yes|no)[\s.!?]*$/i.test(text);
+    // A boilerplate preamble describes the agent, not the work.
+    const isPreamble = (text) => /^you are (?:a|an)\b/i.test(text);
+    const looksLikeTask = (text) =>
+        text.length >= 8 && !isToolEnvelope(text) && !isFiller(text) && !isPreamble(text);
+
+    let source = '';
+    for (const entry of evicted) {
+        const candidate = clean(entry?.user);
+        if (looksLikeTask(candidate)) { source = candidate; break; }
+    }
+    if (!source) {
+        // Nothing in the evicted batch qualified; keep the first non-tool turn so
+        // the ledger still says something, rather than dropping the task entirely.
+        for (const entry of evicted) {
+            const candidate = clean(entry?.user);
+            if (candidate && !isToolEnvelope(candidate)) { source = candidate; break; }
+        }
+    }
+    if (!source) {
         for (const entry of session.history) {
             const candidate = clean(entry?.user);
             if (looksLikeTask(candidate)) { source = candidate; break; }
