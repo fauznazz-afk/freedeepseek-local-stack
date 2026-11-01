@@ -158,3 +158,8 @@ to 9router. Runs on Windows on this machine.
 - Prove claims with a real run, not with reasoning about the code.
 - Never commit credentials. Redact or move to an env var.
 - Do not push to `dekrezz/FreeDeepseekAPI`; that is someone else's repo.
+
+## Traps (new)
+
+- **pwsh `Out-File` / `>` mangles non-ASCII git output.** `git show ...:file | Out-File` decodes UTF-8 bytes with the console codepage, so ｜ (U+FF5C) becomes mojibake. Copy unicode files with `cmd /c "git show ... > dest"` (byte-exact) or the write tool. Cost a full debug loop on the DSML parser port (2026-11-01).
+- Test counts went stale here (291/106). `npm test` = 376 pass, 13 fail as of 2026-11-01; `node --test tests/unit.test.js` = 126 pass.
