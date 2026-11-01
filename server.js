@@ -781,6 +781,26 @@ function scrubLogText(text) {
     out = out.replace(/\bBearer\s+(?!\[redacted\])[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]');
     return out.length > LOG_TEXT_MAX_CHARS ? `${out.slice(0, LOG_TEXT_MAX_CHARS - 1)}…` : out;
 }
+// Same scrub without the row-size clip: the caller clips to 120 chars, and
+// clipping first can split a secret, leaving its prefix readable.
+function scrubUpstreamText(text) {
+    if (text === null || text === undefined || text === '') return '';
+    let out = String(text);
+    const secrets = new Set();
+    if (typeof PROXY_API_KEY === 'string' && PROXY_API_KEY.length >= 6) secrets.add(PROXY_API_KEY);
+    for (const account of [...accounts, { config: DS_CONFIG }]) {
+        const config = account?.config || {};
+        for (const value of [config.token, config.hif_dliq, config.hif_leim]) {
+            if (typeof value === 'string' && value.length >= 6) secrets.add(value);
+        }
+        for (const pair of String(config.cookie || '').split(';')) {
+            const value = (pair.includes('=') ? pair.slice(pair.indexOf('=') + 1) : pair).trim();
+            if (value.length >= 6) secrets.add(value);
+        }
+    }
+    for (const secret of [...secrets].sort((a, b) => b.length - a.length)) out = out.split(secret).join('[redacted]');
+    return out.replace(/\bBearer\s+(?!\[redacted\])[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]');
+}
 function addUsageToMinute(entry) {
     const now = Date.now();
     const ts = Number(entry.ts) || now;
@@ -846,7 +866,7 @@ function clipText(value, max = 200) {
 function countAccountFailure(account, kind, status, detail) {
     account.failures = (account.failures || 0) + 1;
     account.totalFailures = (account.totalFailures || 0) + 1;
-    account.lastError = { kind, status: Number(status) || null, message: clipText(detail), at: Date.now() };
+    account.lastError = { kind, status: Number(status) || null, message: clipText(scrubUpstreamText(detail)), at: Date.now() };
 }
 // Put a login on cooldown after DeepSeek throttled it (HTTP 429, a "too frequent"
 // message in any HTTP/JSON body, or an in-stream hint with rate_limit_reached).
@@ -962,7 +982,7 @@ async function readDeepSeekJsonResponse(resp, label, account) {
                 throw accountRateLimitError(account, text, retryAfter, label, resp.status);
             }
             markAccountFailure(account, resp.status, label, retryAfter, text);
-            throw new Error(`DeepSeek returned non-JSON ${label} response (HTTP ${resp.status}). Run npm run doctor. First chars: ${text.substring(0, 120)}`);
+            throw new Error(`DeepSeek returned non-JSON ${label} response (HTTP ${resp.status}). Run npm run doctor. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
         }
     }
     const message = deepSeekJsonMessage(json);
@@ -1031,8 +1051,26 @@ function prepareSessionForPrompt(session, now = Date.now()) {
     return { reason, ...resetRemoteSession(session) };
 }
 
+// Cap the session map: one entry per agent key, and unkeyed callers create a new
+// key per IP+user-agent. Evict the least recently active, never the one in use.
+const MAX_AGENT_SESSIONS = envNumber('DEEPSEEK_MAX_AGENT_SESSIONS', 200);
+function evictLeastRecentlyUsedSessions(protectedAgentId) {
+    while (sessions.size >= MAX_AGENT_SESSIONS) {
+        let oldestId = null;
+        let oldestAt = Infinity;
+        for (const [agentId, session] of sessions) {
+            if (agentId === protectedAgentId) continue;
+            const at = session.lastActivityAt || 0;
+            if (at < oldestAt) { oldestAt = at; oldestId = agentId; }
+        }
+        if (oldestId === null) return;
+        sessions.delete(oldestId);
+    }
+}
+
 function getOrCreateAgentSession(agentId) {
     if (!sessions.has(agentId)) {
+        evictLeastRecentlyUsedSessions(agentId);
         sessions.set(agentId, createSession());
     }
     const session = sessions.get(agentId);
@@ -1429,7 +1467,7 @@ async function createDeepSeekPowHeader(account, targetPath) {
     try { payload = JSON.parse(text); }
     catch (error) {
         if (isRateLimitSignal(text)) throw accountRateLimitError(account, text, retryAfter, label, response.status);
-        throw new Error(`DeepSeek returned non-JSON PoW response for ${targetPath}. First chars: ${text.substring(0, 120)}`);
+        throw new Error(`DeepSeek returned non-JSON PoW response for ${targetPath}. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
     }
     const challenge = payload?.data?.biz_data?.challenge;
     if (!challenge && isRateLimitSignal(deepSeekJsonMessage(payload))) {
@@ -1440,7 +1478,7 @@ async function createDeepSeekPowHeader(account, targetPath) {
     }
     if (!challenge) {
         markAccountFailure(account, 502, label, null, text);
-        throw createUpstreamHttpError(502, `DeepSeek PoW response has no challenge for ${targetPath}. Run npm run doctor, then npm run auth. First chars: ${text.substring(0, 120)}`);
+        throw createUpstreamHttpError(502, `DeepSeek PoW response has no challenge for ${targetPath}. Run npm run doctor, then npm run auth. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
     }
     const answer = await pow.solvePOW(challenge, account.config.wasmUrl);
     return Buffer.from(JSON.stringify({
@@ -1472,7 +1510,7 @@ async function waitForDeepSeekFile(account, uploadedFile) {
         let payload;
         try { payload = JSON.parse(text); }
         catch (error) {
-            throw new Error(`DeepSeek returned non-JSON file status response. First chars: ${text.substring(0, 120)}`);
+            throw new Error(`DeepSeek returned non-JSON file status response. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
         }
         if (isDeepSeekAuthCode(payload)) throw accountAuthError(account, deepSeekJsonMessage(payload) || text, 'image status');
         const files = payload?.data?.biz_data?.files;
@@ -1514,7 +1552,7 @@ async function uploadDeepSeekImage(account, modelCfg, input, index) {
         if (response.status === 429 || isRateLimitSignal(text)) {
             throw accountRateLimitError(account, text, retryAfter, 'image upload', response.status);
         }
-        throw new Error(`DeepSeek returned non-JSON image upload response. First chars: ${text.substring(0, 120)}`);
+        throw new Error(`DeepSeek returned non-JSON image upload response. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
     }
     if (isDeepSeekAuthCode(payload)) throw accountAuthError(account, deepSeekJsonMessage(payload) || text, 'image upload');
     const file = payload?.data?.biz_data;
@@ -1944,7 +1982,7 @@ async function askDeepSeekStream(prompt, agentId, model = DEFAULT_MODEL_ID, fres
         const { json: sessionData, text: sessionText } = await readDeepSeekJsonResponse(sr, 'session create', account);
         const createdSessionId = sessionData?.data?.biz_data?.chat_session?.id || sessionData?.data?.biz_data?.id;
         if (!sr.ok || !createdSessionId) {
-            throw createUpstreamHttpError(sr.ok ? 502 : sr.status, `Could not create DeepSeek chat session (HTTP ${sr.status}). Auth may be expired/captcha-blocked. Run npm run doctor, then npm run auth. First chars: ${String(sessionText || '').substring(0, 120)}`);
+            throw createUpstreamHttpError(sr.ok ? 502 : sr.status, `Could not create DeepSeek chat session (HTTP ${sr.status}). Auth may be expired/captcha-blocked. Run npm run doctor, then npm run auth. First chars: ${scrubUpstreamText(sessionText || '').substring(0, 120)}`);
         }
         session.id = createdSessionId;
         createdChatId = createdSessionId;
@@ -1985,7 +2023,7 @@ async function askDeepSeekStream(prompt, agentId, model = DEFAULT_MODEL_ID, fres
             const { errText, retryAfter } = failure;
             // A JSON business error on HTTP 200 surfaces as 502 if it is not recovered.
             const failureStatus = resp.status === 200 ? 502 : resp.status;
-            console.log(`${agentTag} Session error (${resp.status}): ${errText.substring(0, 100)}`);
+            console.log(`${agentTag} Session error (${resp.status}): ${scrubUpstreamText(errText).substring(0, 100)}`);
             if (isContextTooLongError(errText)) {
                 throw createUpstreamHttpError(failureStatus, errText, retryAfter);
             }
@@ -1999,7 +2037,7 @@ async function askDeepSeekStream(prompt, agentId, model = DEFAULT_MODEL_ID, fres
                 const { json: sessionData2, text: sessionText2 } = await readDeepSeekJsonResponse(sr2, 'session recreate', account);
                 const createdSessionId2 = sessionData2?.data?.biz_data?.chat_session?.id || sessionData2?.data?.biz_data?.id;
                 if (!sr2.ok || !createdSessionId2) {
-                    throw createUpstreamHttpError(sr2.ok ? 502 : sr2.status, `Could not recreate DeepSeek chat session (HTTP ${sr2.status}). Run npm run doctor, then npm run auth. First chars: ${String(sessionText2 || '').substring(0, 120)}`);
+                    throw createUpstreamHttpError(sr2.ok ? 502 : sr2.status, `Could not recreate DeepSeek chat session (HTTP ${sr2.status}). Run npm run doctor, then npm run auth. First chars: ${scrubUpstreamText(sessionText2 || '').substring(0, 120)}`);
                 }
                 session.id = createdSessionId2;
                 createdChatId = createdSessionId2;
@@ -6400,6 +6438,11 @@ module.exports = {
         resetRemoteSession,
         prepareSessionForPrompt,
         sweepIdleSessions,
+        getOrCreateAgentSession,
+        evictLeastRecentlyUsedSessions,
+        MAX_AGENT_SESSIONS,
+        scrubLogText,
+        scrubUpstreamText,
         sessions,
         accounts,
         selectAccountForSession,
