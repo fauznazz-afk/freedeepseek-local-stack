@@ -113,10 +113,65 @@ function requireProxyApiKey(key, required) {
 
 const PROXY_API_KEY = loadProxyApiKey();
 const PROXY_ADMIN_ALLOW_REMOTE = isTruthy(process.env.PROXY_ADMIN_ALLOW_REMOTE);
+// Headers that only a proxy in front of us may set. A keyless proxy trusts the
+// loopback address, so accepting these from a local web page would let it forge
+// its own origin and reach the admin API.
+const FORWARDING_HEADERS = ['x-forwarded-for', 'forwarded', 'x-real-ip'];
+function hasForwardingHeader(req) {
+    return FORWARDING_HEADERS.some(name => req.headers[name] !== undefined);
+}
+// Without a key, loopback is the only credential. On Windows and macOS the OS
+// cannot tell which local user opened the socket, so a same-machine web page is
+// indistinguishable from the owner. The Host header is the cheap tell: a page
+// served from evil.example still sends its own Host, not 127.0.0.1.
+function isLoopbackHostHeader(hostHeader) {
+    const value = String(hostHeader || '').trim().toLowerCase();
+    if (!value) return true;
+    const withoutPort = value.startsWith('[')
+        ? value.slice(0, value.indexOf(']') + 1)
+        : value.split(':')[0];
+    return isLoopbackHost(withoutPort) || withoutPort === '0.0.0.0';
+}
+function localCallerDecision(req, { proxyKey = PROXY_API_KEY, platform = process.platform } = {}) {
+    if (proxyKey) return { allowed: true };
+    const remoteAddress = req && req.socket ? req.socket.remoteAddress : undefined;
+    const forbidden = (message) => ({ allowed: false, status: 403, error: { message, type: 'local_caller_forbidden' } });
+    if (!isLoopbackHost(remoteAddress)) {
+        return forbidden('This proxy has no PROXY_API_KEY and only accepts loopback clients. Set PROXY_API_KEY to accept other clients.');
+    }
+    if (hasForwardingHeader(req)) {
+        return forbidden('This proxy has no PROXY_API_KEY and rejects forwarded-for headers from a local caller. Set PROXY_API_KEY to run it behind another proxy.');
+    }
+    if (platform !== 'linux' && !isLoopbackHostHeader(req && req.headers ? req.headers.host : '')) {
+        return forbidden('This proxy has no PROXY_API_KEY and only accepts the local user that started it. Set PROXY_API_KEY to share it.');
+    }
+    return { allowed: true };
+}
 const PROXY_CORS_ORIGINS = new Set(String(process.env.PROXY_CORS_ORIGINS || '')
     .split(',')
     .map(value => normalizeOrigin(value))
     .filter(Boolean));
+// One file without the other, or a file that cannot be read, fails closed:
+// falling back to HTTP would send the login import and Authorization header in
+// clear text.
+function readTlsCredentials(env = process.env) {
+    const certFile = typeof env.TLS_CERT_FILE === 'string' ? env.TLS_CERT_FILE.trim() : '';
+    const keyFile = typeof env.TLS_KEY_FILE === 'string' ? env.TLS_KEY_FILE.trim() : '';
+    if (!certFile && !keyFile) return null;
+    if (!certFile || !keyFile) {
+        throw new Error('TLS_CERT_FILE and TLS_KEY_FILE must both be set to serve HTTPS. Leave both unset to keep HTTP.');
+    }
+    const readPem = (name, file) => {
+        try {
+            const pem = fs.readFileSync(path.resolve(file));
+            if (!pem.length) throw Object.assign(new Error('file is empty'), { code: 'EINVAL' });
+            return pem;
+        } catch (error) {
+            throw new Error(`Could not read ${name} (${file}): ${error.message}`);
+        }
+    };
+    return { cert: readPem('TLS_CERT_FILE', certFile), key: readPem('TLS_KEY_FILE', keyFile) };
+}
 function printBanner() {
     printWordmark();
 }
@@ -1311,10 +1366,56 @@ function isPrivateNetworkAddress(address) {
         if (value === '::' || value === '::1') return true;
         if (value.startsWith('fc') || value.startsWith('fd')) return true;
         if (/^fe[89ab]/.test(value)) return true;
-        const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-        return mapped ? isPrivateNetworkAddress(mapped[1]) : false;
+        // Every textual form of ::ffff:0:0/96, not only ::ffff:a.b.c.d.
+        // dns.lookup returns hex (::ffff:7f00:1) and keeps uncompressed
+        // literals (0:0:0:0:0:ffff:127.0.0.1); both open TCP to the IPv4.
+        const mapped = ipv4FromMappedIpv6(value);
+        if (mapped) return isPrivateNetworkAddress(mapped);
+        return false;
     }
     return true;
+}
+
+function parseIpv6Groups(address) {
+    let text = String(address || '').toLowerCase();
+    const colon = text.lastIndexOf(':');
+    const tail = colon === -1 ? text : text.slice(colon + 1);
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(tail)) {
+        const octets = tail.split('.').map(Number);
+        if (octets.some(octet => octet > 255)) return null;
+        const hi = (octets[0] << 8) | octets[1];
+        const lo = (octets[2] << 8) | octets[3];
+        text = `${text.slice(0, colon + 1)}${hi.toString(16)}:${lo.toString(16)}`;
+    } else if (text.includes('.')) {
+        return null;
+    }
+    const halves = text.split('::');
+    if (halves.length > 2) return null;
+    const parseHalf = (half) => {
+        if (half === '') return [];
+        const parts = half.split(':');
+        if (parts.some(part => !/^[0-9a-f]{1,4}$/.test(part))) return null;
+        return parts.map(part => parseInt(part, 16));
+    };
+    const head = parseHalf(halves[0]);
+    if (head === null) return null;
+    if (halves.length === 1) return head.length === 8 ? head : null;
+    const tailGroups = parseHalf(halves[1]);
+    if (tailGroups === null) return null;
+    const missing = 8 - head.length - tailGroups.length;
+    if (missing < 0) return null;
+    return [...head, ...new Array(missing).fill(0), ...tailGroups];
+}
+
+function ipv4FromMappedIpv6(address) {
+    const groups = parseIpv6Groups(address);
+    if (!groups || groups.length !== 8) return '';
+    const mapped = groups[0] === 0 && groups[1] === 0 && groups[2] === 0
+        && groups[3] === 0 && groups[4] === 0 && groups[5] === 0xffff;
+    if (!mapped) return '';
+    const hi = groups[6];
+    const lo = groups[7];
+    return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
 }
 
 async function assertPublicImageUrl(url) {
@@ -3391,31 +3492,92 @@ function currentTurnToolMessages(messages) {
     }
     return list.slice(lastUser + 1).filter(msg => msg?.role === 'tool');
 }
+const DELIVERABLE_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+
+// Strictly inside root: `/tmp-extra` is not inside `/tmp`, and `..` does not count.
+function isPathInside(root, candidate) {
+    const rel = path.relative(path.resolve(root), path.resolve(candidate));
+    if (!rel || rel === '.') return false;
+    if (path.isAbsolute(rel)) return false;
+    return !rel.split(path.sep).includes('..');
+}
+
+// Tool results are client-supplied. Keep a path only when it is a regular image
+// (png, jpg, jpeg, webp, gif), not a symlink, and its real path stays inside
+// os.tmpdir(). Anything else is omitted, including a file that exists outside
+// the temp dir, so the reply does not confirm an arbitrary path.
+function deliverableScreenshotPath(filePath) {
+    if (typeof filePath !== 'string' || !filePath || /[\0\r\n]/.test(filePath) || !path.isAbsolute(filePath)) return null;
+    if (!DELIVERABLE_IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) return null;
+
+    let tmpRoot;
+    try {
+        tmpRoot = fs.realpathSync(path.resolve(os.tmpdir()));
+    } catch (e) {
+        return null;
+    }
+    const tmpLexical = path.resolve(os.tmpdir());
+    let lexical;
+    try {
+        lexical = path.resolve(filePath);
+    } catch (e) {
+        return null;
+    }
+    // Reject paths that are already outside the temp dir before statting them.
+    const inRoot = isPathInside(tmpRoot, lexical);
+    const inLexical = isPathInside(tmpLexical, lexical);
+    if (!inRoot && !inLexical) return null;
+
+    let listed;
+    try {
+        listed = fs.lstatSync(lexical);
+    } catch (e) {
+        return null;
+    }
+    if (listed.isSymbolicLink() || !listed.isFile()) return null;
+
+    let real;
+    try {
+        real = fs.realpathSync(lexical);
+    } catch (e) {
+        return null;
+    }
+    if (!isPathInside(tmpRoot, real) || /[\0\r\n]/.test(real)) return null;
+    const expectedRel = inRoot ? path.relative(tmpRoot, lexical) : path.relative(tmpLexical, lexical);
+    if (path.relative(tmpRoot, real) !== expectedRel) return null;
+    if (!DELIVERABLE_IMAGE_EXTENSIONS.has(path.extname(real).toLowerCase())) return null;
+
+    let realListed;
+    try {
+        realListed = fs.lstatSync(real);
+    } catch (e) {
+        return null;
+    }
+    if (realListed.isSymbolicLink() || !realListed.isFile()) return null;
+    if (typeof process.getuid === 'function' && realListed.uid !== process.getuid()) return null;
+    return real;
+}
+
 function extractScreenshotPaths(messages) {
     const paths = [];
-    const fs = require('fs');
+    const seen = new Set();
+    const pushDeliverable = (filePath) => {
+        const canonical = deliverableScreenshotPath(filePath);
+        if (!canonical) return;
+        const tag = `MEDIA:${canonical}`;
+        if (seen.has(tag)) return;
+        seen.add(tag);
+        paths.push(tag);
+    };
     for (const msg of currentTurnToolMessages(messages)) {
         const text = normalizeMessageContent(msg.content);
-        if (text) {
-            // Look for screenshot_path or path fields in JSON tool results
-            // These come DIRECTLY from browser_vision — always the real path
-            const pngMatch = text.match(/["'](screenshot_path|path)["']\s*:\s*["']([^"']+\.(?:png|jpg|jpeg|webp|gif))["']/i);
-            if (pngMatch) {
-                const filePath = pngMatch[2];
-                if (filePath.startsWith('/') && fs.existsSync(filePath) && !paths.includes(`MEDIA:${filePath}`)) {
-                    paths.push(`MEDIA:${filePath}`);
-                }
-            }
-            // Also catch plain MEDIA: tags
-            const mediaMatch = text.match(/MEDIA:(\S+)/g);
-            if (mediaMatch) {
-                for (const tag of mediaMatch) {
-                    const extractedPath = tag.replace(/^MEDIA:/, '');
-                    if (fs.existsSync(extractedPath) && !paths.includes(tag)) {
-                        paths.push(tag);
-                    }
-                }
-            }
+        if (!text) continue;
+        // Look for screenshot_path or path fields in JSON tool results.
+        const pngMatch = text.match(/["'](screenshot_path|path)["']\s*:\s*["']([^"']+\.(?:png|jpg|jpeg|webp|gif))["']/i);
+        if (pngMatch) pushDeliverable(pngMatch[2]);
+        const mediaMatch = text.match(/MEDIA:(\S+)/g);
+        if (mediaMatch) {
+            for (const tag of mediaMatch) pushDeliverable(tag.replace(/^MEDIA:/, ''));
         }
     }
     return paths;
@@ -4930,7 +5092,13 @@ async function serveDashboard(req, res, pathname) {
 }
 
 // === HTTP Server ===
-const server = http.createServer(async (req, res) => {
+// HTTP unless both TLS PEM files are set. Read once at load so a broken pair
+// fails before the port is opened, not on the first request.
+const TLS_CREDENTIALS = readTlsCredentials();
+const publicScheme = () => TLS_CREDENTIALS ? 'https' : 'http';
+const server = (TLS_CREDENTIALS ? https.createServer(TLS_CREDENTIALS, handler) : http.createServer(handler));
+
+async function handler(req, res) {
     const requestOrigin = req.headers.origin;
     res.setHeader('Vary', 'Origin');
     if (!isBrowserOriginAllowed(requestOrigin)) {
@@ -4941,6 +5109,13 @@ const server = http.createServer(async (req, res) => {
     if (requestOrigin) res.setHeader('Access-Control-Allow-Origin', normalizeOrigin(requestOrigin));
     setCorsResponseHeaders(res);
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+    const localCaller = localCallerDecision(req);
+    if (!localCaller.allowed) {
+        res.writeHead(localCaller.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: localCaller.error }));
+        return;
+    }
 
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -6135,7 +6310,7 @@ const server = http.createServer(async (req, res) => {
             if (activeSession && activeSession.messageCount > 0) saveSessions();
         }
     });
-});
+}
 
 async function runAuthScript() {
     const script = path.join(__dirname, 'scripts', 'deepseek_chrome_auth.js');
@@ -6267,7 +6442,7 @@ async function main() {
     loadSessions();
     loadSharedLedger();
     server.listen(PORT, HOST, () => {
-        console.log(`[DS-API] Server on http://${HOST}:${PORT} (multi-agent sessions enabled)`);
+        console.log(`[DS-API] Server on ${publicScheme()}://${HOST}:${PORT} (multi-agent sessions enabled)`);
         console.log('[DS-API] POST /v1/chat/completions (OpenAI Chat Completions, stream=true|false)');
         console.log('[DS-API] POST /v1/messages — Anthropic Messages shim for Claude Code');
         console.log('[DS-API] POST /v1/responses — OpenAI Responses API shim');
@@ -6417,6 +6592,13 @@ module.exports = {
         normalizeApiParams,
         extractImageInputs,
         materializeImageInput,
+        readTlsCredentials,
+        localCallerDecision,
+        isLoopbackHostHeader,
+        isPrivateNetworkAddress,
+        ipv4FromMappedIpv6,
+        parseIpv6Groups,
+        extractScreenshotPaths,
         formatMessages,
         isOpenCodeSystemPrompt,
         adaptOpenCodeSystemPrompt,

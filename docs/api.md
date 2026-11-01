@@ -253,6 +253,7 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 | `DEEPSEEK_AUTH_DIR` | `./accounts` if present | All `*.json` in that directory |
 | `PROXY_CORS_ORIGINS` | loopback | Extra exact browser origins |
 | `DEEPSEEK_MAX_AGENT_SESSIONS` | `200` | Cap on the agent session map. Past it, the least recently active session is evicted |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | unset | Set both to serve HTTPS. One without the other fails at startup; never falls back to HTTP |
 | `DEEPSEEK_MAX_CONCURRENT` | `24` | Process-wide cap. Real parallelism is **number of idle logins** |
 | `DEEPSEEK_ACCOUNT_LOCK_WAIT_MS` | `120000` | How long a second chat waits for a busy login |
 | `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | After 401/403, or a rate limit without `Retry-After` |
