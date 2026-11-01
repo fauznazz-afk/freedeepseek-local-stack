@@ -8,7 +8,7 @@ This is a **Web-session** API, not `api.deepseek.com`. One DeepSeek login can se
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/health` | public | Liveness. Account list if no `PROXY_API_KEY` or Bearer matches. Its `failures` is the lifetime count |
+| GET | `/health` | public | Liveness. Account list if no `PROXY_API_KEY` or Bearer matches. Its `failures` is the lifetime count. `session_reuse.replay_chars` is the **effective** replay budget, `replay_chars_configured` the raw env value |
 | GET | `/readyz` | public | `200` only if at least one account can serve now |
 | GET | `/dashboard` | public (static page, no data) | Account dashboard. Reads `/admin/*` |
 | GET | `/admin/accounts` | admin (see below) | `{ now, pool, accounts }` |
@@ -283,8 +283,7 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 | `DEEPSEEK_SESSION_TTL_MS` | `7200000` | How long one Web chat is reused before a fresh one is opened |
 | `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Messages per chat before a forced reset. Minimum 2 |
 | `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Local turns replayed into a replacement chat. Raise with `MAX_MESSAGE_DEPTH` |
-| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Char budget for that replay. Minimum 1000. Clamped at runtime to 35% of `DEEPSEEK_MAX_PROMPT_CHARS` (`HISTORY_BUDGET_SHARE`) |
-| `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Per-session ledger of dropped paths, commands and errors |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Char budget for that replay. Minimum 1000. Clamped at runtime to 35% of `DEEPSEEK_MAX_PROMPT_CHARS` (`HISTORY_BUDGET_SHARE`) || `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Per-session ledger of dropped paths, commands and errors |
 | `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Shared project ledger inherited by new agent keys. `0` = off |
 | `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | How long an idle session survives on disk |
 | `DEEPSEEK_MAX_SESSIONS` | `500` | Session cap loaded from disk at startup |

@@ -5291,7 +5291,7 @@ async function handler(req, res) {
             chat_locks: listAccountChatLocks(),
             accounts: accounts.map(accountStatus),
             config_ready: hasAuthConfig(),
-            session_reuse: { strategy: 'sticky per x-agent-session/user', ttl_minutes: Math.round(SESSION_TTL_MS / 60000), max_messages: MAX_MESSAGE_DEPTH, idle_evict_minutes: Math.round(SESSION_IDLE_EVICT_MS / 60000), max_sessions: MAX_SESSIONS_ON_DISK, replay_messages: MAX_HISTORY_LENGTH, replay_chars: MAX_HISTORY_CHARS, reset_all: 'POST /reset-session?agent=all' },
+            session_reuse: { strategy: 'sticky per x-agent-session/user', ttl_minutes: Math.round(SESSION_TTL_MS / 60000), max_messages: MAX_MESSAGE_DEPTH, idle_evict_minutes: Math.round(SESSION_IDLE_EVICT_MS / 60000), max_sessions: MAX_SESSIONS_ON_DISK, replay_messages: MAX_HISTORY_LENGTH, replay_chars: Math.min(MAX_HISTORY_CHARS, MAX_HISTORY_CHARS_BUDGET), replay_chars_configured: MAX_HISTORY_CHARS, reset_all: 'POST /reset-session?agent=all' },
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(health));

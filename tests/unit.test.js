@@ -2627,7 +2627,6 @@ test('the replay budget is clamped to what buildBoundedPrompt can actually spend
   assert.equal(tight.configured, 480000, 'the env value is still reported as configured');
   assert.equal(tight.budget, Math.floor(480000 * tight.share));
   assert.ok(tight.budget < tight.configured, 'the effective budget is smaller than the request');
-
   // A budget already inside the share is left untouched.
   const roomy = run({ DEEPSEEK_MAX_PROMPT_CHARS: '800000', DEEPSEEK_MAX_HISTORY_CHARS: '100000' });
   assert.equal(roomy.budget, Math.floor(800000 * roomy.share));

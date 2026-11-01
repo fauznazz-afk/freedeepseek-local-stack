@@ -1,0 +1,16 @@
+Expose the effective replay budget in /health and refresh counts
+
+/health published session_reuse.replay_chars straight from the env value, so it
+reported 480000 on this machine while storeHistory only ever kept 168000 - the
+clamp added in the previous commit was invisible from the outside.
+
+Publish both: replay_chars (effective, what the store actually keeps) and
+replay_chars_configured (the raw env value). Verified live after restart:
+replay_chars=168000, replay_chars_configured=400000.
+
+Tests: a new /health case asserts both fields are present and that the effective
+budget never exceeds the configured one. npm test = 380 pass / 13 fail (baseline
+agents-api 10 + chrome-setup 3), unit 129, account-failover 77.
+
+Also refresh the counts in README.md, MEMORY.md and document the new /health
+field in docs/api.md.

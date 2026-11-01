@@ -205,6 +205,19 @@ test('/health account status keeps failures as the lifetime count', () => {
   assert.equal(status.failures, 4);
 });
 
+test('/health reports the effective replay budget, not just the configured one', async (t) => {
+  // Reporting the raw env value made the clamp invisible: /health said 480000
+  // while the store only ever kept 168000. Both are exposed so the difference
+  // can be seen without reading the source.
+  const port = await startServer(t);
+  const res = await request(port, 'GET', '/health');
+  assert.equal(res.status, 200, res.text);
+  const reuse = res.json.session_reuse;
+  assert.ok(reuse.replay_chars > 0, 'effective replay budget is published');
+  assert.ok(reuse.replay_chars_configured > 0, 'configured value is published too');
+  assert.ok(reuse.replay_chars <= reuse.replay_chars_configured, 'the effective budget never exceeds the configured one');
+});
+
 test('a rate-limit signal is never classified as context-too-long', () => {
   assert.equal(S.isContextTooLongError('Prompt rate limit exceeded'), false);
   assert.equal(S.isContextTooLongError({ content: RATE_TEXT, finish_reason: 'rate_limit_reached' }), false);
