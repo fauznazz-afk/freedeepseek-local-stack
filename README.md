@@ -315,9 +315,10 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 | Cek rantai | `deepseek-local verify` — harus `CHAIN_OK` |
 | Login ulang DeepSeek | `npm run auth` |
 | Diagnosa | `npm run doctor` |
-| Tes unit | `node --test tests/unit.test.js` — 125 pass, 0 fail |
+| Tes unit | `node --test tests/unit.test.js` — 147 pass, 0 fail |
+| Tes konkurensi | `node --test tests/concurrency.test.js` — 9 pass, 0 fail |
 | Tes inisiatif | `node --test tests/initiative*.test.js` - 18 pass, 0 fail |
-| Tes penuh | `npm test` - 388 pass, 13 fail (baseline) |
+| Tes penuh | `npm test` - 408 pass, 13 fail (baseline) |
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
 menjalankan proses kedua.
@@ -744,8 +745,9 @@ pakai field body `"agent_autonomy": true`.
 ## Tes
 
 ```powershell
-node --test tests/unit.test.js     # 125 pass, 0 fail
-npm test                           # 388 pass, 13 fail
+node --test tests/unit.test.js     # 147 pass, 0 fail
+npm test                           # 408 pass, 13 fail
+node --test tests/concurrency.test.js   # 9 pass, 0 fail
 node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
 node --test tests/initiative*.test.js                                   # 18 pass, 0 fail
 ```

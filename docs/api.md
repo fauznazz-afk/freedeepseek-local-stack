@@ -58,6 +58,8 @@ The proxy keeps its own copy of the conversation so a reset chat can be replayed
 
 `GET /v1/sessions` reports the result per agent: `history_size` and `history_chars` (what is stored now), plus `compactions` and `last_compacted_at`. The newest turn is never evicted, so a single oversized turn stays until a newer one arrives.
 
+Compaction is safe under parallel load: requests for the same agent share one session object, and every mutation (history, ledger, counters) happens synchronously inside one turn, so no two requests interleave mid-write. The session map is bounded by `DEEPSEEK_MAX_AGENT_SESSIONS` and swept by `DEEPSEEK_SESSION_IDLE_EVICT_MS`; both skip any agent that still has a request in flight, because dropping such a session loses its ledger and banked opening request even though the turn itself is re-stored.
+
 OpenCode's bundled prompt is kept, but token-economy / "ask first" lines are rewritten for DeepSeek Web: finish the task autonomously and do not ask clarifying questions. `npm run setup:agents -- --target opencode` writes the same rule to `~/.config/opencode/AGENTS.md`.
 
 ## Image input
@@ -273,7 +275,7 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 | `DEEPSEEK_AUTH_PATH` | `./deepseek-auth.json` | One file, or comma-separated list |
 | `DEEPSEEK_AUTH_DIR` | `./accounts` if present | All `*.json` in that directory |
 | `PROXY_CORS_ORIGINS` | loopback | Extra exact browser origins |
-| `DEEPSEEK_MAX_AGENT_SESSIONS` | `200` | Cap on the agent session map. Past it, the least recently active session is evicted |
+| `DEEPSEEK_MAX_AGENT_SESSIONS` | `200` | Cap on the agent session map. Past it, the least recently active session is evicted; a session with a request still in flight is never evicted or swept |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | unset | Set both to serve HTTPS. One without the other fails at startup; never falls back to HTTP |
 | `DEEPSEEK_MAX_CONCURRENT` | `24` | Process-wide cap. Real parallelism is **number of idle logins** |
 | `DEEPSEEK_ACCOUNT_LOCK_WAIT_MS` | `120000` | How long a second chat waits for a busy login |
@@ -293,7 +295,7 @@ The full field list (`AgentSummary`, `FileMeta`) is in [`public/dashboard/API.md
 | `DEEPSEEK_AUTO_COMPACT` | on | When the stored history overflows its budget, bank the evicted turns' paths, commands and errors into the session ledger before dropping them. `0`, `false`, `off`, `no` restore the old lossy trim |
 | `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Per-session ledger of dropped paths, commands and errors |
 | `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Shared project ledger inherited by new agent keys. `0` = off |
-| `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | How long an idle session survives on disk |
+| `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | How long an idle session survives. A session with a request in flight is never swept |
 | `DEEPSEEK_MAX_SESSIONS` | `500` | Session cap loaded from disk at startup |
 | `TRUST_PROXY` | off | If `1`, client IP uses `X-Forwarded-For` |
 | `PROXY_BASE_URL` | listen address | Address written into agent configs by the Agents page and `setup:agents` |

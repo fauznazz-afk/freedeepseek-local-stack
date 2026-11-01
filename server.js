@@ -244,7 +244,17 @@ function ensureSessionsDir() {
 function serializeSessions() {
     const out = {};
     for (const [agentId, session] of sessions.entries()) {
-        if (!session || session.messageCount === 0) continue;
+        if (!session) continue;
+        // Skip only truly empty sessions. The old guard was `messageCount === 0`,
+        // but resetRemoteSession() deliberately zeroes messageCount while KEEPING
+        // history, memory and the banked opening request ("Keep local recovery
+        // history"). So a single upstream error made a long session serialize to
+        // nothing and vanish from disk on the next save - observed live as one of
+        // six parallel agents disappearing after a PoW failure.
+        const hasHistory = Array.isArray(session.history) && session.history.length > 0;
+        const hasMemory = (Array.isArray(session.memory) && session.memory.length > 0)
+            || (Array.isArray(session.decisions) && session.decisions.length > 0);
+        if ((session.messageCount || 0) === 0 && !hasHistory && !hasMemory && !session.openingRequest) continue;
         out[agentId] = {
             id: session.id || null,
             parentMessageId: session.parentMessageId || null,
@@ -422,6 +432,22 @@ let dsHeaders = {};
 const accounts = [];
 let accountRoundRobin = 0;
 let inFlight = 0;  // concurrent in-flight completions (backpressure cap)
+// How many requests are in flight per agent. Eviction and the idle sweep must not
+// drop a session whose request has not finished storing its turn yet: the turn
+// itself survives (storeHistory re-creates the session), but the banked memory,
+// decisions and opening request of that session are silently lost.
+const activeAgentRequests = new Map();
+function beginAgentRequest(agentId) {
+    if (!agentId) return;
+    activeAgentRequests.set(agentId, (activeAgentRequests.get(agentId) || 0) + 1);
+}
+function endAgentRequest(agentId) {
+    if (!agentId) return;
+    const next = (activeAgentRequests.get(agentId) || 0) - 1;
+    if (next > 0) activeAgentRequests.set(agentId, next);
+    else activeAgentRequests.delete(agentId);
+}
+const agentRequestInFlight = (agentId) => (activeAgentRequests.get(agentId) || 0) > 0;
 // Overall wall-clock budget for one inbound request (caps the retry/continuation
 // loops), max concurrent completions, and the empty-response retry cap.
 const REQUEST_DEADLINE_MS = envNumber('DEEPSEEK_REQUEST_DEADLINE_MS', 120000);
@@ -759,18 +785,25 @@ function selectPinnedAccount(session, pinnedId, now) {
 function selectAccountForSession(session, holder = null) {
     const now = Date.now();
     if (holder?.pinnedAccountId) return selectPinnedAccount(session, String(holder.pinnedAccountId), now);
+    // A login that just failed this request transiently must not be picked again
+    // for it: the sticky assignment below would otherwise hand back the same dead
+    // login on every hop, and the failover loop would burn all its hops on it.
+    const excluded = holder?.excludedAccountIds;
+    const usable = (account) => accountCanServe(account, now)
+        && !(excluded && excluded.has(account.id));
     if (session.accountId) {
         const sticky = accounts.find(a => a.id === session.accountId);
-        if (sticky && accountCanServe(sticky, now)) {
+        if (sticky && usable(sticky)) {
             return sticky;
         }
         // A DeepSeek chat_session belongs to the auth account that created it.
-        // If that account disappeared, lost credentials, is paused, or is cooling down,
-        // never reuse its session id under a different account.
+        // If that account disappeared, lost credentials, is paused, is cooling down,
+        // or just failed this request, never reuse its session id under a different
+        // account.
         resetRemoteSession(session);
         session.accountId = null;
     }
-    const ready = accounts.filter(a => accountCanServe(a, now));
+    const ready = accounts.filter(usable);
     if (ready.length === 0) {
         const waiting = accounts.filter(a => accountHasCredentials(a) && isAccountEnabled(a)).sort((a, b) => a.cooldownUntil - b.cooldownUntil)[0];
         if (waiting) {
@@ -1031,10 +1064,27 @@ function accountRateLimitError(account, detail, retryAfterRaw, label, status = 4
 function isAccountRateLimitError(error) {
     return error?.accountRateLimited === true;
 }
-// Both account-level failure types the request itself can survive by hopping to
-// another ready login: throttled (quota window) and auth-rejected (dead token).
+// A transient failure while SETTING UP the chat (empty/malformed PoW challenge, a
+// 5xx from chat_session/create) says nothing about the request itself, so hopping
+// to another login is worth one attempt. Without this, a single PoW hiccup failed
+// the whole request even with seven healthy logins: observed live as all six
+// parallel agents dying on the same turn with "non-JSON PoW response ... First
+// chars: ".
+//
+// Deliberately narrow: a 5xx from the COMPLETION endpoint is not included. That
+// path already has its own retry/continuation logic, and a failed completion must
+// reach the client (tests/account-failover.test.js asserts a 503 is surfaced, not
+// retried behind the caller's back). Only setup failures carry the flag.
+function isTransientSetupError(error) {
+    return error?.transientSetupFailure === true;
+}
+// Failure types the request itself can survive by hopping to another ready login:
+// throttled (quota window), auth-rejected (dead token), and a transient failure
+// while setting up the chat with that one login.
 function isAccountFailoverError(error) {
-    return isAccountRateLimitError(error) || error?.accountAuthFailed === true;
+    return isAccountRateLimitError(error)
+        || error?.accountAuthFailed === true
+        || isTransientSetupError(error);
 }
 // DeepSeek answers an expired or revoked login with business codes 40001-40003,
 // often on HTTP 200. Cool the login down and return a typed 401.
@@ -1146,14 +1196,18 @@ function prepareSessionForPrompt(session, now = Date.now()) {
 }
 
 // Cap the session map: one entry per agent key, and unkeyed callers create a new
-// key per IP+user-agent. Evict the least recently active, never the one in use.
+// key per IP+user-agent. Evict the least recently active, never one still in use:
+// a request holding a session that gets evicted keeps writing to an orphan, and
+// its banked memory/decisions/opening request are lost for good.
 const MAX_AGENT_SESSIONS = envNumber('DEEPSEEK_MAX_AGENT_SESSIONS', 200);
-function evictLeastRecentlyUsedSessions(protectedAgentId) {
-    while (sessions.size >= MAX_AGENT_SESSIONS) {
+function evictLeastRecentlyUsedSessions(protectedAgentId, cap = MAX_AGENT_SESSIONS) {
+    const limit = Math.max(1, Math.floor(Number(cap) || MAX_AGENT_SESSIONS));
+    while (sessions.size >= limit) {
         let oldestId = null;
         let oldestAt = Infinity;
         for (const [agentId, session] of sessions) {
             if (agentId === protectedAgentId) continue;
+            if (agentRequestInFlight(agentId)) continue;
             const at = session.lastActivityAt || 0;
             if (at < oldestAt) { oldestAt = at; oldestId = agentId; }
         }
@@ -1174,11 +1228,14 @@ function getOrCreateAgentSession(agentId) {
 
 // Evict idle sessions so the Map (keyed by client IP / user id) can't grow without
 // bound on a long-running process. Drops entries untouched for the configured idle
-// window (default 2× the session TTL).
+// window (default 2× the session TTL). A session with a request still in flight is
+// never swept: lastActivityAt is stamped at request START, so a slow request looks
+// idle while it is still working.
 function sweepIdleSessions(maxIdleMs = SESSION_IDLE_EVICT_MS) {
     const now = Date.now();
     let removed = 0;
     for (const [agentId, session] of sessions) {
+        if (agentRequestInFlight(agentId)) continue;
         if (now - (session.lastActivityAt || 0) > maxIdleMs) { sessions.delete(agentId); removed++; }
     }
     if (removed) console.log(`[DS-API] swept ${removed} idle session(s); ${sessions.size} remain`);
@@ -1607,7 +1664,10 @@ async function createDeepSeekPowHeader(account, targetPath) {
     try { payload = JSON.parse(text); }
     catch (error) {
         if (isRateLimitSignal(text)) throw accountRateLimitError(account, text, retryAfter, label, response.status);
-        throw new Error(`DeepSeek returned non-JSON PoW response for ${targetPath}. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
+        const failure = createUpstreamHttpError(502, `DeepSeek returned non-JSON PoW response for ${targetPath}. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
+        failure.accountId = account?.id || null;
+        failure.transientSetupFailure = true;
+        throw failure;
     }
     const challenge = payload?.data?.biz_data?.challenge;
     if (!challenge && isRateLimitSignal(deepSeekJsonMessage(payload))) {
@@ -1618,7 +1678,10 @@ async function createDeepSeekPowHeader(account, targetPath) {
     }
     if (!challenge) {
         markAccountFailure(account, 502, label, null, text);
-        throw createUpstreamHttpError(502, `DeepSeek PoW response has no challenge for ${targetPath}. Run npm run doctor, then npm run auth. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
+        const failure = createUpstreamHttpError(502, `DeepSeek PoW response has no challenge for ${targetPath}. Run npm run doctor, then npm run auth. First chars: ${scrubUpstreamText(text).substring(0, 120)}`);
+        failure.accountId = account?.id || null;
+        failure.transientSetupFailure = true;
+        throw failure;
     }
     const answer = await pow.solvePOW(challenge, account.config.wasmUrl);
     return Buffer.from(JSON.stringify({
@@ -5602,6 +5665,7 @@ async function handler(req, res) {
         const deadlineHit = () => Date.now() - requestStartedAt > REQUEST_DEADLINE_MS;
         let activeSession = null;
         let activeAgentId = null;
+        let agentSlotHeld = false;
         const lockHolder = { id: crypto.randomUUID(), agentId: null };
         const logRow = {
             request_id: requestId,
@@ -5658,6 +5722,8 @@ async function handler(req, res) {
                 console.log(`${agentTag} Guard blocks relaxed for this request (no NO-TOOLS CONTRACT / no "do not paste source" rule).`);
             }
             activeAgentId = agentId;
+            beginAgentRequest(agentId);
+            agentSlotHeld = true;
             lockHolder.agentId = agentId;
             // Optional: serve this request with one named login (the dashboard account switcher).
             const pinnedAccount = String(req.headers['x-account-id'] || '').trim();
@@ -5974,6 +6040,12 @@ async function handler(req, res) {
                     // Uploaded file ids and the chat lock belong to the failed login.
                     releaseAccountChatLock(lockHolder);
                     imageContext.refFileIds.length = 0;
+                    // Remember the failure for THIS request so the next hop does not
+                    // pick the same login again through the sticky session.
+                    if (failedAccountId) {
+                        if (!lockHolder.excludedAccountIds) lockHolder.excludedAccountIds = new Set();
+                        lockHolder.excludedAccountIds.add(failedAccountId);
+                    }
                     console.log(`${agentTag} account ${failedAccountId} ${isAccountRateLimitError(lastError) ? 'rate-limited' : 'rejected this credential'}; failing over (hop ${hop + 1}).`);
                 }
                 // Pool-wide cooldown: preserve context and retry up to 3 times
@@ -6622,6 +6694,7 @@ async function handler(req, res) {
             if (!logRow.account) logRow.account = activeSession?.accountId || null;
             recordRequest(logRow);
             releaseAccountChatLock(lockHolder);
+            if (agentSlotHeld) { agentSlotHeld = false; endAgentRequest(activeAgentId); }
             releaseSlot();
             if (activeSession && activeSession.messageCount > 0) saveSessions();
         }
@@ -6947,6 +7020,11 @@ module.exports = {
         sweepIdleSessions,
         getOrCreateAgentSession,
         evictLeastRecentlyUsedSessions,
+        beginAgentRequest,
+        endAgentRequest,
+        agentRequestInFlight,
+        activeAgentRequests,
+        MAX_CONCURRENT,
         MAX_AGENT_SESSIONS,
         scrubLogText,
         scrubUpstreamText,
