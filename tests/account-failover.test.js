@@ -7,6 +7,13 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 
+// Keep this suite's fake accounts ('limited', 'auth', 'plain') out of the real
+// data/cooldowns.json. markAccountFailure() writes to the cooldown store, and
+// that store is keyed by account id - so a test id landed next to the live
+// accounts and survived as a phantom cooldown.
+process.env.DEEPSEEK_COOLDOWN_STATE_PATH = require('node:path').join(
+  fs.mkdtempSync(require('node:path').join(os.tmpdir(), 'fdsapi-cooldown-')), 'cooldowns.json');
+
 const pow = require('../lib/pow');
 const S = require('../server.js').__test;
 

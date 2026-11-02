@@ -232,6 +232,9 @@ const sessions = new Map();  // keyed by agent ID (from `user` field)
 const SESSIONS_FILE_PATH = path.join(__dirname, 'data', 'sessions.json');
 const MAX_SESSION_FILE_BYTES = 50 * 1024 * 1024; // 50 MB
 // Cooldowns survive restarts: the throttle lives upstream, not in this process.
+// The env override exists so a test can keep its fake accounts out of the real
+// state file - tests that call markAccountFailure() with ids like 'hop_acct'
+// used to leave those entries in data/cooldowns.json.
 const COOLDOWNS_FILE_PATH = process.env.DEEPSEEK_COOLDOWN_STATE_PATH
     || path.join(__dirname, 'data', 'cooldowns.json');
 const cooldownStore = createCooldownStore(COOLDOWNS_FILE_PATH);

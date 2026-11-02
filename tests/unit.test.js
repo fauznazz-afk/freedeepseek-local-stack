@@ -2,6 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
+const pathMod = require('node:path');
+// Point the cooldown store at a throwaway file BEFORE server.js is loaded. Tests
+// below call markAccountFailure() with fake ids ('hop_acct', 'limited', 'auth');
+// without this they persisted into the real data/cooldowns.json, where they sat
+// next to the live accounts and made `deepseek-local restart` look broken.
+process.env.DEEPSEEK_COOLDOWN_STATE_PATH = pathMod.join(
+  fs.mkdtempSync(pathMod.join(os.tmpdir(), 'fdsapi-cooldown-')), 'cooldowns.json');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
