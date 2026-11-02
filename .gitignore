@@ -41,3 +41,7 @@ local-stack/.tmp-*
 
 # Knowledge graph output (graphify).
 graphify-out/
+
+# temp files used by agent sessions
+.tmp-*
+

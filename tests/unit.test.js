@@ -2666,6 +2666,14 @@ test('the banked opening request is the real task, not a greeting or preamble', 
     { turns: ['hi', 'TASK: refactor the payment module to use the new API'], expect: /refactor the payment module/ },
     { turns: ['You are a coding agent.', 'TASK: refactor the payment module'], expect: /refactor the payment module/ },
     { turns: ['ok', 'lanjut', 'TASK: refactor the payment module'], expect: /refactor the payment module/ },
+    // The real OpenCode envelope: banking it verbatim stored 205 chars of wrapper
+    // plus "Reply with only the title" and lost the task. unwrapTask() pulls the
+    // quoted message out, so the banked line must be the task and nothing else.
+    {
+      turns: ['Here is the first message of the conversation:\n\n<message>\n"Read big.txt lines 500 to 550."\n</message>\n\nReply with only the title.'],
+      expect: /^Read big\.txt lines 500 to 550\.$/,
+    },
+    { turns: ['Here is the first message: "Fix the login redirect bug" Reply with only the title.'], expect: /^Fix the login redirect bug$/ },
   ];
   for (const c of cases) {
     const session = serverInternals.createSession();
@@ -2676,6 +2684,8 @@ test('the banked opening request is the real task, not a greeting or preamble', 
     serverInternals.compactHistory(session, 168000, serverInternals.MAX_HISTORY_LENGTH);
     assert.match(session.openingRequest || '', c.expect,
       `opening request must carry the task for turns ${JSON.stringify(c.turns)}`);
+    assert.doesNotMatch(session.openingRequest || '', /Here is the first message|Reply with only the title|<message>/i,
+      `the title envelope must never be banked for turns ${JSON.stringify(c.turns)}`);
   }
 });
 

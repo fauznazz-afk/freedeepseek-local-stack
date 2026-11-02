@@ -5531,7 +5531,7 @@ async function handler(req, res) {
     const requestId = String(req.headers['x-request-id'] || '').trim().slice(0, 64) || crypto.randomUUID();
     res.setHeader('x-request-id', requestId);
 
-    const isPublicProbe = req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/readyz' || isDashboardPath(url.pathname));
+    const isPublicProbe = req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/readyz' || url.pathname === '/v2/health' || url.pathname === '/api/info' || isDashboardPath(url.pathname));
     if (!isPublicProbe && !isProxyAuthorized(req.headers.authorization)) {
         res.writeHead(401, {
             'Content-Type': 'application/json',
@@ -5578,6 +5578,16 @@ async function handler(req, res) {
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(health));
+        return;
+    }
+
+    // OpenCode V2 compatibility health probe. '/health' is deliberately absent: it is
+    // answered above with the full status payload, and listing it here as well was
+    // dead code that would have replaced that payload with {"ok":true} the moment
+    // the earlier branch moved.
+    if (req.method === 'GET' && (url.pathname === '/v2/health' || url.pathname === '/api/info')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
         return;
     }
 

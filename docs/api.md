@@ -10,6 +10,7 @@ This is a **Web-session** API, not `api.deepseek.com`. One DeepSeek login can se
 |---|---|---|---|
 | GET | `/health` | public | Liveness. Account list if no `PROXY_API_KEY` or Bearer matches. Its `failures` is the lifetime count. `session_reuse.replay_chars` is the **effective** replay budget, `replay_chars_configured` the raw env value |
 | GET | `/readyz` | public | `200` only if at least one account can serve now |
+| GET | `/v2/health`, `/api/info` | public | Client-compatibility probes: `{"ok":true}`. Answer before a key exists, so they never `401`/`404`. `/health` is not one of them: it keeps the full status payload above |
 | GET | `/dashboard` | public (static page, no data) | Account dashboard. Reads `/admin/*` |
 | GET | `/admin/accounts` | admin (see below) | `{ now, pool, accounts }` |
 | POST | `/admin/accounts/<id>/disable` | admin | Runtime pause. `{ account, pool }`; `404 account_not_found` |
