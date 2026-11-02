@@ -3669,6 +3669,22 @@ function compactHistory(session, budgetChars, maxEntries) {
     const budget = Math.max(1000, Math.floor(Number(budgetChars) || 0));
     const maxCount = Math.max(2, Math.floor(Number(maxEntries) || MAX_HISTORY_LENGTH));
     const sizeOf = (entry) => String(entry?.user || '').length + String(entry?.assistant || '').length;
+    // Collapse consecutive duplicate turns before measuring. A real OpenCode session
+    // stored the same 6196-char tool result three times in a row: the client retried
+    // a turn and resent an identical transcript, and each retry was appended as a
+    // new history entry. That is 12 KB of the 58 KB transcript spent on copies, and
+    // it pushes a session into compaction (and off the end of the budget) sooner
+    // than the real conversation warrants. Only CONSECUTIVE duplicates are removed:
+    // the same file legitimately read again later is a different turn.
+    for (let i = session.history.length - 1; i > 0; i--) {
+        const current = session.history[i];
+        const previous = session.history[i - 1];
+        if (current && previous
+            && String(current.user || '') === String(previous.user || '')
+            && String(current.user || '').length > 0) {
+            session.history.splice(i - 1, 1);
+        }
+    }
     let chars = session.history.reduce((sum, entry) => sum + sizeOf(entry), 0);
     let dropped = 0;
     const evicted = [];
@@ -3903,10 +3919,19 @@ function harvestSessionMemory(session, droppedText) {
     if (!Array.isArray(session.memory)) session.memory = [];
     if (!Array.isArray(session.decisions)) session.decisions = [];
     const anchors = contextLib.extractAnchors(droppedText, 200);
+    // The same path reaches the ledger in more than one spelling: a tool result
+    // that JSON-escaped it ("C:\\repo\\src\\a.js") and one that did not
+    // ("C:\repo\src\a.js") are the same file, but both were banked, and a real
+    // OpenCode session showed 14 facts of which half were such pairs. Collapse
+    // repeated backslashes before comparing, so a fact costs one slot, not two.
+    const dedupeKey = (line) => line.replace(/\\{2,}/g, '\\');
+    const known = new Set(session.memory.map(dedupeKey));
     let added = 0;
     for (const anchor of anchors) {
         const line = String(anchor || '').trim().slice(0, 250);
-        if (line.length < 4 || session.memory.includes(line)) continue;
+        const key = dedupeKey(line);
+        if (line.length < 4 || known.has(key)) continue;
+        known.add(key);
         session.memory.push(line);
         if (sharedLedger.enabled) sharedLedger.bank(line);
         added++;
@@ -3980,30 +4005,54 @@ function bankOpeningRequest(session, evicted) {
     const clean = (text) => String(text || '')
         .replace(/^\s*(?:User|Assistant|System|Tool)\s*:\s*/i, '')
         .trim();
+    // Agents do not send the task bare. OpenCode opens with a session-title request
+    // ("Here is the first message of the conversation: <message>\"...\"</message>
+    // Reply with only the title.") and Codex wraps the task in similar boilerplate.
+    // Banking that verbatim stored 205 chars of envelope and the instruction to
+    // reply with a title - not the task. Pull the quoted task out of the wrapper
+    // when there is one.
+    const unwrapTask = (text) => {
+        const messageTag = text.match(/<message>([\s\S]*?)<\/message>/i);
+        if (messageTag) {
+            const inner = messageTag[1].trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+            if (inner.length >= 8) return inner;
+        }
+        // "Here is the first message: "Fix the login bug" Reply with only the title."
+        const quoted = text.match(/"([^"]{8,})"/) || text.match(/'([^']{8,})'/);
+        if (quoted) {
+            const inner = quoted[1].trim();
+            // Ignore a quoted fragment that is just the meta instruction itself.
+            if (inner.length >= 8 && !/^reply with only the title$/i.test(inner)) return inner;
+        }
+        return text;
+    };
     const isToolEnvelope = (text) => /^\[(?:Tool Result|Tool|Recovery)/i.test(text);
     // A greeting or a one-word acknowledgement is not the task.
     const isFiller = (text) => /^(?:hi|hey|hello|halo|hai|ok|okay|sure|thanks|thank you|lanjut|continue|go on|proceed|yes|no)[\s.!?]*$/i.test(text);
     // A boilerplate preamble describes the agent, not the work.
     const isPreamble = (text) => /^you are (?:a|an)\b/i.test(text);
+    // A wrapper that only asks for a title, summary or acknowledgement carries no
+    // task of its own once the quoted message has been extracted.
+    const isMetaRequest = (text) => /^(?:here is the first message|reply with only the title|generate a title|summari[sz]e)/i.test(text);
     const looksLikeTask = (text) =>
-        text.length >= 8 && !isToolEnvelope(text) && !isFiller(text) && !isPreamble(text);
+        text.length >= 8 && !isToolEnvelope(text) && !isFiller(text) && !isPreamble(text) && !isMetaRequest(text);
 
     let source = '';
     for (const entry of evicted) {
-        const candidate = clean(entry?.user);
+        const candidate = unwrapTask(clean(entry?.user));
         if (looksLikeTask(candidate)) { source = candidate; break; }
     }
     if (!source) {
         // Nothing in the evicted batch qualified; keep the first non-tool turn so
         // the ledger still says something, rather than dropping the task entirely.
         for (const entry of evicted) {
-            const candidate = clean(entry?.user);
+            const candidate = unwrapTask(clean(entry?.user));
             if (candidate && !isToolEnvelope(candidate)) { source = candidate; break; }
         }
     }
     if (!source) {
         for (const entry of session.history) {
-            const candidate = clean(entry?.user);
+            const candidate = unwrapTask(clean(entry?.user));
             if (looksLikeTask(candidate)) { source = candidate; break; }
         }
     }

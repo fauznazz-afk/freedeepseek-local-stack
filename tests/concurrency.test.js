@@ -459,6 +459,90 @@ test('compaction survives a reset in the middle of a session', () => {
   assert.ok(Array.isArray(session.memory), 'the ledger is still an array');
 });
 
+test('consecutive duplicate turns are collapsed, but real repeats are kept', () => {
+  // A real OpenCode session stored the same 6196-char tool result three times in a
+  // row, because the client retried a turn and resent an identical transcript. That
+  // is 12 KB of a 58 KB transcript spent on copies.
+  const S_ = S;
+  const big = '[Tool Result]\nRead file big.txt lines 200-250\n' + 'x'.repeat(6000);
+  const session = S_.createSession();
+  session.history.push({ user: big, assistant: 'TOOL_CALL: read {offset:200}' });
+  session.history.push({ user: big, assistant: 'TOOL_CALL: read {limit:51,offset:200}' });
+  session.history.push({ user: big, assistant: '249' });
+  session.history.push({ user: 'next turn', assistant: 'ok' });
+  S_.compactHistory(session, 168000, S_.MAX_HISTORY_LENGTH);
+
+  assert.equal(session.history.length, 2,
+    `three identical turns collapse to one, got ${session.history.length}`);
+  assert.equal(session.history[0].assistant, '249',
+    'the LAST copy is kept, because it carries the real answer');
+  assert.equal(session.history[1].user, 'next turn', 'the following turn is untouched');
+
+  // The same content read again later is a different turn and must be kept.
+  const legit = S_.createSession();
+  legit.history.push({ user: 'read file A', assistant: 'done' });
+  legit.history.push({ user: 'read file B', assistant: 'done' });
+  legit.history.push({ user: 'read file A', assistant: 'done again' });
+  S_.compactHistory(legit, 168000, S_.MAX_HISTORY_LENGTH);
+  assert.equal(legit.history.length, 3, 'non-consecutive repeats are real turns and stay');
+});
+
+test('the banked opening request is the task, not the agent wrapper', () => {
+  // Real agents do not send the task bare. OpenCode opens a session with a title
+  // request that wraps the real message:
+  //   "Here is the first message of the conversation: <message>"..."</message>
+  //    Reply with only the title."
+  // Banking that verbatim stored 205 chars of envelope plus an instruction to reply
+  // with a title, so the ledger's most important line was not the task at all.
+  const fill = (session) => {
+    for (let i = 0; i < 60; i++) {
+      session.history.push({ user: `step ${i} C:\\r\\f${i}.js ` + 'z'.repeat(4000), assistant: 'ok' });
+    }
+  };
+  const opening = (first) => {
+    const session = S.createSession();
+    session.history.push({ user: first, assistant: 'ok' });
+    fill(session);
+    S.compactHistory(session, 168000, S.MAX_HISTORY_LENGTH);
+    return session.openingRequest || '';
+  };
+
+  const wrapped = opening('Here is the first message of the conversation:\n\n<message>\n'
+    + '"Read big.txt lines 500 to 550 and tell me the module number on the last line."\n'
+    + '</message>\n\nReply with only the title.');
+  assert.equal(wrapped,
+    'Read big.txt lines 500 to 550 and tell me the module number on the last line.',
+    'the <message> body is banked without the wrapper');
+  assert.ok(!/Here is the first message|Reply with only the title/.test(wrapped),
+    'no envelope survives into the ledger');
+
+  // A quoted task without the tag (another wrapper shape) must also be unwrapped.
+  const quoted = opening('Here is the first message: "Fix the login bug in auth.js" Reply with only the title.');
+  assert.equal(quoted, 'Fix the login bug in auth.js', 'bare-quoted task is unwrapped');
+
+  // A task that was never wrapped must be banked as-is.
+  const plain = opening('TASK: refactor the payment module. Reply OK.');
+  assert.equal(plain, 'TASK: refactor the payment module. Reply OK.', 'a plain task is untouched');
+});
+
+test('the ledger does not bank the same path twice in different escapings', () => {
+  // A tool result that JSON-escaped a path and one that did not are the same file,
+  // but both were banked. A real OpenCode session held 14 facts of which half were
+  // such pairs, wasting half the 16000-char ledger on duplicates.
+  const session = S.createSession();
+  S.harvestSessionMemory(session,
+    'C:\\\\repo\\\\proj\\\\src\\\\module500.js and C:\\repo\\proj\\src\\module500.js and C:\\repo\\proj\\src\\module777.js');
+  assert.equal(session.memory.length, 2,
+    `one slot per distinct file, got ${JSON.stringify(session.memory)}`);
+  // A genuinely different path must still be banked.
+  assert.ok(session.memory.some(l => l.includes('module777')), 'the distinct path survived');
+
+  // Dedupe must also work against facts already in the ledger.
+  const before = session.memory.length;
+  S.harvestSessionMemory(session, 'C:\\\\repo\\\\proj\\\\src\\\\module777.js');
+  assert.equal(session.memory.length, before, 're-harvesting an escaped variant adds nothing');
+});
+
 test('a session survives a save after an upstream error zeroed messageCount', async (t) => {
   // serializeSessions used to skip `messageCount === 0`, but resetRemoteSession()
   // deliberately zeroes messageCount while keeping history, memory and the banked

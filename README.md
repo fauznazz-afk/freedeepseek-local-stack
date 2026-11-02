@@ -316,9 +316,9 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 | Login ulang DeepSeek | `npm run auth` |
 | Diagnosa | `npm run doctor` |
 | Tes unit | `node --test tests/unit.test.js` — 147 pass, 0 fail |
-| Tes konkurensi | `node --test tests/concurrency.test.js` — 9 pass, 0 fail |
+| Tes konkurensi | `node --test tests/concurrency.test.js` — 18 pass, 0 fail |
 | Tes inisiatif | `node --test tests/initiative*.test.js` - 18 pass, 0 fail |
-| Tes penuh | `npm test` - 408 pass, 13 fail (baseline) |
+| Tes penuh | `npm test` - 417 pass, 13 fail (baseline) |
 
 Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
 menjalankan proses kedua.
@@ -746,8 +746,8 @@ pakai field body `"agent_autonomy": true`.
 
 ```powershell
 node --test tests/unit.test.js     # 147 pass, 0 fail
-npm test                           # 408 pass, 13 fail
-node --test tests/concurrency.test.js   # 9 pass, 0 fail
+npm test                           # 417 pass, 13 fail
+node --test tests/concurrency.test.js   # 18 pass, 0 fail
 node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
 node --test tests/initiative*.test.js                                   # 18 pass, 0 fail
 ```
@@ -804,6 +804,25 @@ atas ~500–760k karakter dengan stream 0 karakter. Plafon efektif di mesin ini
 **Cooldown hilang setelah restart.** Itu perilaku lama. Sekarang cooldown
 dipersist di `data/cooldowns.json` supaya restart tidak bisa dipakai keluar dari
 throttle.
+
+- **Escaping can create duplicate ledger entries.** If a turn carries a JSON
+  string or escaped path that matches a decision anchor, `extractDecisions()`
+  may bank the same fact twice. Dedupe uses exact string equality after
+  stripping the line prefix; verify with raw strings, not rendered output.
+- **Consecutive duplicate turns are real, not test noise.** The loop detector
+  treats identical user/tool turns as a stall and pushes the model to change
+  approach. This fires both in tests and in production when a client retries
+  without advancing the prompt.
+- **Real-agent envelope wrapping is mandatory for tool calls.** The proxy
+  expects `{"tool_call":{...}}` when tools are advertised. Stripping that
+  envelope produces `502 malformed_tool_call`; it is a parsing contract, not a
+  style rule.
+- **OpenCode sends no `x-agent-session` header.** When OpenCode is used
+  directly (not through 9router), the proxy receives no session key and falls
+  back to an `unkeyed-<hash>` session keyed by remote address + User-Agent.
+  Unrelated OpenCode clients therefore never share a chat. 9router itself
+  drops the header, so the same fallback applies there; use the `user` body
+  field when you need explicit session pinning.
 
 ---
 

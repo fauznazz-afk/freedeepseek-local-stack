@@ -312,4 +312,25 @@ effective history budget becomes `168000` chars, 35% of the cap), sets
 defaults until `npm run setup` copies the example and you edit it. Source of
 truth: `README.md` → [Konfigurasi env](../README.md#konfigurasi-env).
 
+## Traps
+
+- **Escaping can create duplicate ledger entries.** If a turn carries a JSON
+  string or escaped path that matches a decision anchor, `extractDecisions()`
+  may bank the same fact twice. Dedupe uses exact string equality after
+  stripping the line prefix; verify with raw strings, not rendered output.
+- **Consecutive duplicate turns are real, not test noise.** The loop detector
+  treats identical user/tool turns as a stall and pushes the model to change
+  approach. This fires both in tests and in production when a client retries
+  without advancing the prompt.
+- **Real-agent envelope wrapping is mandatory for tool calls.** The proxy
+  expects `{"tool_call":{...}}` when tools are advertised. Stripping that
+  envelope produces `502 malformed_tool_call`; it is a parsing contract, not a
+  style rule.
+- **OpenCode sends no `x-agent-session` header.** When OpenCode is used
+  directly (not through 9router), the proxy receives no session key and falls
+  back to an `unkeyed-<hash>` session keyed by remote address + User-Agent.
+  Unrelated OpenCode clients therefore never share a chat. 9router itself
+  drops the header, so the same fallback applies there; use the `user` body
+  field when you need explicit session pinning.
+
 Docker: [`Containerfile`](../Containerfile). Auth: [`auth.md`](auth.md). Models: [`models.md`](models.md).
