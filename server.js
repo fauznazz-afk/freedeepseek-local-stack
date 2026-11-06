@@ -118,27 +118,7 @@ const PROXY_CORS_ORIGINS = new Set(String(process.env.PROXY_CORS_ORIGINS || '')
     .split(',')
     .map(value => normalizeOrigin(value))
     .filter(Boolean));
-// One file without the other, or a file that cannot be read, fails closed:
-// falling back to HTTP would send the login import and Authorization header in
-// clear text.
-function readTlsCredentials(env = process.env) {
-    const certFile = typeof env.TLS_CERT_FILE === 'string' ? env.TLS_CERT_FILE.trim() : '';
-    const keyFile = typeof env.TLS_KEY_FILE === 'string' ? env.TLS_KEY_FILE.trim() : '';
-    if (!certFile && !keyFile) return null;
-    if (!certFile || !keyFile) {
-        throw new Error('TLS_CERT_FILE and TLS_KEY_FILE must both be set to serve HTTPS. Leave both unset to keep HTTP.');
-    }
-    const readPem = (name, file) => {
-        try {
-            const pem = fs.readFileSync(path.resolve(file));
-            if (!pem.length) throw Object.assign(new Error('file is empty'), { code: 'EINVAL' });
-            return pem;
-        } catch (error) {
-            throw new Error(`Could not read ${name} (${file}): ${error.message}`);
-        }
-    };
-    return { cert: readPem('TLS_CERT_FILE', certFile), key: readPem('TLS_KEY_FILE', keyFile) };
-}
+// printBanner and helpers
 function printBanner() {
     printWordmark();
 }
@@ -1097,7 +1077,7 @@ function markAccountRateLimited(account, detail = '', retryAfterRaw = null, stat
     account.cooldownReason = 'rate_limit';
     countAccountFailure(account, 'rate_limit', status, detail);
     cooldownStore.record(account);
-    console.log(`[account:${account.id}] rate-limited${reason ? ` (${reason})` : ''}: cooldown for ${Math.round(baseCooldown / 1000)}s${retryMs != null ? ' (Retry-After)' : (account.rlStreak > 1 ? ` (window ${account.rlStreak}x)` : '')} after HTTP ${status}: ${clipText(detail, 120)}`);
+    console.log(`[account:${account.id}] rate-limited${reason ? ` (${reason})` : ''}: cooldown for ${Math.round(baseCooldown / 1000)}s${retryMs != null ? ' (Retry-After)' : (account.rlStreak > 1 ? ` (window ${account.rlStreak}x)` : '')} after HTTP ${status}: ${clipText(scrubUpstreamText(detail), 120)}`);
     return baseCooldown;
 }
 function markAccountFailure(account, status, reason = '', retryAfterRaw = null, detail = '') {
@@ -1294,7 +1274,7 @@ function prepareSessionForPrompt(session, now = Date.now()) {
 const MAX_AGENT_SESSIONS = envNumber('DEEPSEEK_MAX_AGENT_SESSIONS', 200);
 function evictLeastRecentlyUsedSessions(protectedAgentId, cap = MAX_AGENT_SESSIONS) {
     const limit = Math.max(1, Math.floor(Number(cap) || MAX_AGENT_SESSIONS));
-    while (sessions.size >= limit) {
+    while (sessions.size > limit) {
         let oldestId = null;
         let oldestAt = Infinity;
         for (const [agentId, session] of sessions) {
@@ -1310,7 +1290,6 @@ function evictLeastRecentlyUsedSessions(protectedAgentId, cap = MAX_AGENT_SESSIO
 
 function getOrCreateAgentSession(agentId) {
     if (!sessions.has(agentId)) {
-        evictLeastRecentlyUsedSessions(agentId);
         sessions.set(agentId, createSession());
     }
     const session = sessions.get(agentId);
@@ -1415,7 +1394,8 @@ const {
 } = require('./lib/classify');
 
 function createUpstreamHttpError(status, body = '', retryAfter = null) {
-    const verdict = classifyUpstreamFailure({ status, body });
+    const safeBody = scrubUpstreamText(body);
+    const verdict = classifyUpstreamFailure({ status, body: safeBody });
     const detail = verdict.detail;
     const retryMs = parseRetryAfterMs(retryAfter);
     const safeRetryAfter = retryMs != null ? String(Math.max(1, Math.ceil(retryMs / 1000))) : null;
@@ -4829,17 +4809,17 @@ function localCallerDecision({ remoteAddress, peerUid = null, inodeResolved = fa
 }
 function requestLocalCallerDecision(req, { proxyKey = PROXY_API_KEY, platform = process.platform, ownUid = typeof process.getuid === 'function' ? process.getuid() : null, peerCred = null } = {}) {
     const remoteAddress = req && req.socket ? req.socket.remoteAddress : undefined;
-    if (proxyKey || platform !== 'linux') {
+    if (proxyKey || (platform !== 'linux' && typeof localCallerPeerCred !== 'function')) {
         return localCallerDecision({ remoteAddress, platform, proxyKey, inodeResolved: false, peerUid: null, ownUid });
     }
     const cred = peerCred || incomingPeerCred(req && req.socket);
     return localCallerDecision({
         remoteAddress,
-        platform: 'linux',
+        platform: typeof localCallerPeerCred === 'function' ? 'linux' : platform,
         proxyKey: '',
         inodeResolved: Boolean(cred && cred.inodeResolved),
         peerUid: cred && Number.isInteger(cred.peerUid) ? cred.peerUid : null,
-        ownUid,
+        ownUid: ownUid ?? 0,
     });
 }
 

@@ -554,7 +554,9 @@ test('loopback host detection covers supported local bind addresses', () => {
 function writePemPair(dir) {
   const cert = path.join(dir, 'cert.pem');
   const key = path.join(dir, 'key.pem');
-  const made = spawnSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-keyout', key, '-out', cert, '-days', '1', '-nodes', '-subj', '/CN=localhost'], { encoding: 'utf8' });
+  const cnf = path.join(dir, 'openssl.cnf');
+  fs.writeFileSync(cnf, '[req]\ndistinguished_name = req_distinguished_name\n[req_distinguished_name]\n');
+  const made = spawnSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-keyout', key, '-out', cert, '-days', '1', '-nodes', '-subj', '/CN=localhost', '-config', cnf], { encoding: 'utf8' });
   assert.equal(made.status, 0, made.stderr);
   return { cert, key };
 }
@@ -582,8 +584,12 @@ test('TLS stays off unless both PEM files are set and readable, including off lo
 
   const dir = tmpdir();
   const unread = path.join(dir, 'unread.pem');
-  fs.writeFileSync(unread, 'not empty');
-  fs.chmodSync(unread, 0);
+  if (process.platform === 'win32') {
+    fs.mkdirSync(unread);
+  } else {
+    fs.writeFileSync(unread, 'not empty');
+    fs.chmodSync(unread, 0);
+  }
   const denied = runNode(['-e', 'require("./server.js")'], { env: { TLS_CERT_FILE: unread, TLS_KEY_FILE: unread } });
   assert.notEqual(denied.status, 0);
   assert.match(denied.stderr, /Could not read TLS_CERT_FILE/);

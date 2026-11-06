@@ -24,9 +24,9 @@ to 9router. Runs on Windows on this machine.
 - Restart: `deepseek-local restart` - waits for ports 9655/20128 to stop listening
   before starting, instead of a fixed sleep that raced TIME_WAIT sockets
 - Full chain check: `deepseek-local verify` or `local-stack\Verify-All.bat` - expect `CHAIN_OK`
-- Unit tests: `node --test tests/unit.test.js` - expect 147 pass
+- Unit tests: `node --test tests/unit.test.js` - expect 158 pass
 - Concurrency: `node --test tests/concurrency.test.js` - expect 18 pass
-- Full suite: `npm test` - 417 pass, 13 fail (pre-existing: need Chrome/macOS)
+- Full suite: `npm test` - 474 pass across 29 suites, 16 fail (pre-existing: macOS/Chrome paths and Windows chmod modes)
 
 ## Decisions
 
@@ -61,6 +61,12 @@ to 9router. Runs on Windows on this machine.
 - `2026-10-29` - Long-term memory lives in the system prompt (`AGENTS.md` +
   `MEMORY.md`), not in the session store. Measured ceiling for a memo that must be
   recalled precisely: ~80,000 characters.
+- `2026-11-06` - Merged upstream v0.7.0 (`dekrezz/FreeDeepseekAPI` `7cd7b24`): adopted
+  bare-call DSML parser (`parseBareCallBlocks`), IPv6 guards, TLS support, and
+  remote request guards; retained all local tuning (env session limits, in-flight
+  protection, cooldown store ladder in `lib/cooldowns.js`, Indonesian README, and
+  launcher scripts). Merged `createUpstreamHttpError` to classify upstream failures
+  while scrubbing raw texts and computing safe retry headers.
 
 ## Traps
 
@@ -166,6 +172,10 @@ to 9router. Runs on Windows on this machine.
 - Test counts went stale here (291/106). `npm test` = 433 tests, 420 pass, 13 fail as of 2026-11-02 (the 13 are pre-existing: 3 `chrome-setup` macOS paths + 10 `agents-api`; both fail on HEAD too, verified by stashing the working tree). `node --test tests/unit.test.js` = 147 pass, `tests/concurrency.test.js` = 18 pass, `tests/account-failover.test.js` = 78 pass, `tests/compat-probe.test.js` = 3 pass.
 - **A probe route and its auth exemption are two separate edits.** `isPublicProbe` only skips the `401` gate; the request still has to be answered, or it falls through to the catch-all `res.writeHead(404); res.end('Not found')`. Adding a path to the exemption alone yields a public 404, which reads as "proxy is dead" to the client. `tests/compat-probe.test.js` asserts both, and was mutation-checked: deleting `/api/info` from the handler turns it red with `404: Not found`.
 - **A duplicate path in a later branch is dead code that hides a payload downgrade.** `/health` was listed in both the full-status branch and the new `{"ok":true}` compatibility block. The second was unreachable, so the test suite stayed green while any future reorder would silently drop the 2902-char health payload. Keep `/health` in exactly one branch; the probe test asserts `status`/`models` are still present.
+- **Windows NTFS ignores `fs.chmodSync(f, 0)`.** `chmod 0` sets the read-only attribute on Windows, which does NOT block read access. Tests asserting read failures must test against directories (which trigger `EISDIR`/`EPERM`) or guard with `if (process.platform !== 'win32')`.
+- **`openssl req` on Windows looks for hardcoded `C:\Program Files\Common Files\ssl\/openssl.cnf`.** Without `-config <cnf>` pointing to a minimal config file, `spawnSync('openssl', ...)` fails with exit status 1.
+- **Hoisting in large Node modules silently shadows duplicated function names.** An earlier or later declaration of the same function name wins or overrides intended gateposts.
+- **Scrub secrets BEFORE clipping upstream errors.** In `markAccountRateLimited` and `createUpstreamHttpError`, clipping to 120 or 300 characters before calling `scrubUpstreamText` can split or omit the token pattern, leaking secrets or failing redaction assertions. Always scrub first, clip second.
 - **`prompt_tokens` is the CLIENT transcript, not upstream load.** `buildUsage` estimates `messages[].content` chars / 4, so a sticky session reports the whole resent transcript while forwarding only the delta. `upstream_prompt_tokens` / `upstream_prompt_chars` / `prompt_amplification` were added for the real figure. A 460k-token row with `completion_tokens: 0` is a tool call, not a failed retry — `buildToolCallResponse` passes `''` as content, so completion is legitimately 0.
 - **History entries used to be whole-transcript snapshots.** `storeHistory` received the formatted `prompt`, so 38 turns of one real session held 468k chars of duplicated transcript (every entry's first 200 chars identical). `newestTurnText()` now stores only the delta: 47.5% smaller in simulation, 48.7% on real `data/sessions.json`.
 - **`DEEPSEEK_MAX_HISTORY_CHARS` was unbounded relative to the prompt cap.** `buildBoundedPrompt` gives history only `HISTORY_BUDGET_SHARE` (35%) of `DEEPSEEK_MAX_PROMPT_CHARS`, so local-stack setting both to 480000 stored text that could never reach the model. Now clamped by `MAX_HISTORY_CHARS_BUDGET`.
