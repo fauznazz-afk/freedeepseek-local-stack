@@ -5,7 +5,7 @@
 <h1 align="center">FreeDeepseekAPI</h1>
 
 <p align="center">
-  <strong>Use your free DeepSeek account as an API</strong>
+  <strong>Pakai akun DeepSeek gratis sebagai API</strong>
 </p>
 
 <p align="center">
@@ -15,291 +15,58 @@
   <img alt="OpenAI compatible" src="https://img.shields.io/badge/OpenAI-compatible-111111.svg" />
 </p>
 
-<p align="center">
-  <a href="#pasang">Pasang</a> •
-  <a href="#cara-kerja">Cara kerja</a> •
-  <a href="#perintah-harian">Perintah harian</a> •
-  <a href="#model">Model</a> •
-  <a href="#konfigurasi">Konfigurasi</a> •
-  <a href="#masalah-umum">Masalah umum</a>
-</p>
+Proxy API lokal di depan **DeepSeek Web Chat** ([chat.deepseek.com](https://chat.deepseek.com)).
+Arahkan Open WebUI, LiteLLM, Hermes, Claude Code, Codex, OpenCode, Cursor, atau klien
+OpenAI-compatible mana pun ke sini. Tanpa API key berbayar `api.deepseek.com`.
 
-FreeDeepseekAPI menjalankan server API lokal di depan **DeepSeek Web Chat**
-([chat.deepseek.com](https://chat.deepseek.com)). Arahkan Open WebUI, LiteLLM,
-Hermes, Claude Code, Codex, OpenCode, OpenClaw, Cursor, atau klien OpenAI-compatible
-mana pun ke sini.
+Satu model: **DeepSeek-V4.1-Flash**. Native Web Search **nyala default**;
+`-thinking` menyalakan DeepThink, `-nosearch` atau `"web_search": false` mematikan pencarian.
 
-Proxy memakai akun DeepSeek yang sudah kamu login di browser. Tidak ada API key
-berbayar `api.deepseek.com`.
-
-Satu model tersedia: **DeepSeek-V4.1-Flash** (rilis upstream 2026-10-17; ID API resmi
-`deepseek-flash`, alias di proxy ini). Native Web Search chat.deepseek.com
-**nyala secara default**, dan pencarian itulah yang menjawab pertanyaan internet
-terbaru. `-thinking` menyalakan DeepThink. `-nosearch` atau `"web_search": false`
-mematikan pencarian.
-
-> Ini proxy eksperimental di atas Web chat. DeepSeek bisa mengubah API Web
-> privatnya kapan saja. Kalau itu terjadi, proyek ini diperbarui mengikutinya.
+> Proxy eksperimental di atas Web chat. DeepSeek bisa mengubah API Web privatnya kapan saja.
 
 ---
 
 ## Isi
 
 - [Pasang](#pasang)
-  - [Prasyarat](#prasyarat)
-  - [Langkah](#langkah)
-  - [Login DeepSeek](#login-deepseek)
-  - [Tanpa shim](#tanpa-shim)
-  - [Proxy saja](#proxy-saja-tanpa-9router)
-  - [Akun kedua](#akun-kedua-dan-seterusnya)
-  - [Upgrade](#upgrade-dari-clone-lama)
-- [Cara kerja](#cara-kerja)
 - [Perintah harian](#perintah-harian)
-- [Struktur repo](#struktur-repo)
-- [Konfigurasi sesi](#konfigurasi-sesi)
-- [Multi-akun](#multi-akun)
 - [Model](#model)
 - [Endpoint](#endpoint)
-- [Konfigurasi env](#konfigurasi-env)
-- [Memori jangka panjang](#memori-jangka-panjang)
-- [Refactor mode](#refactor-mode)
-- [Mode otonom](#mode-otonom)
+- [Cara kerja](#cara-kerja)
+- [Multi-akun](#multi-akun)
+- [Konfigurasi](#konfigurasi)
 - [Tes](#tes)
 - [Masalah umum](#masalah-umum)
-- [Lisensi](#lisensi)
 
 ---
 
 ## Pasang
 
-### Prasyarat
-
-| Kebutuhan | Wajib? | Catatan |
-|---|---|---|
-| Windows 10/11 + PowerShell 5.1 (atau `pwsh` 7) | wajib | Launcher `local-stack/` memakai PowerShell |
-| Node.js 18+ | wajib | `node --version` harus >= 18. Ambil LTS dari nodejs.org |
-| npm | wajib | Ikut Node.js |
-| Chrome | wajib untuk login | Jendela login DeepSeek memakai Chrome for Testing |
-| Akun DeepSeek | wajib | Satu cukup; 2-3 akun membuat rotasi saat rate limit |
-| `9router` | opsional | Hanya untuk rantai penuh. `install.ps1` memasangnya otomatis |
-
-Pastikan PowerShell boleh menjalankan script. Cek sekali:
-
-```powershell
-Get-ExecutionPolicy -List
-```
-
-Kalau `CurrentUser` masih `Restricted`, izinkan dulu:
+Butuh Windows 10/11 + PowerShell, Node.js 18+, npm, Chrome (untuk login), dan akun
+DeepSeek. `9router` opsional untuk rantai penuh.
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
-
-### Langkah
-
-Dari root repo, satu perintah memasang semuanya:
-
-```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1
-npm run auth      # login DeepSeek di jendela Chrome yang terbuka
+npm run auth            # login DeepSeek di Chrome
 deepseek-local start
-deepseek-local verify   # harus berakhir CHAIN_OK
+deepseek-local verify   # harus CHAIN_OK
 ```
 
-Yang dikerjakan `install.ps1`, berurutan:
+`install.ps1` idempoten dan fail-closed. Flag: `-Check` (laporan saja),
+`-SkipRouter` (proxy saja), `-SkipShim` (tanpa PATH shim).
 
-1. Cek Node 18+ dan npm. Kalau tidak memenuhi, installer berhenti dengan pesan jelas.
-2. Salin `local-stack/settings.local.example.ps1` ke `settings.local.ps1`.
-3. Pasang perintah `deepseek-local` dan tambahkan `~/.local/bin` ke PATH user.
-4. Pasang `9router` global kalau tidak ada build lokal maupun global.
-5. Cetak tiga langkah lanjutan di atas.
+**Login DeepSeek:** setelah `npm run auth`, login di Chrome, kirim satu pesan (`ok`),
+Enter. Hasil `deepseek-auth.json` (mode 0600, git-ignored). Jangan commit.
 
-Sifat yang dijaga:
+**Tanpa shim:** `local-stack\Start-All.bat`, `Verify-All.bat`, `Stop-All.bat`.
 
-- **Idempoten.** Jalankan ulang kapan saja. File yang sudah ada tidak ditimpa.
-- **Fail-closed.** Langkah yang gagal ditandai `[FAIL]` dengan sebabnya, lalu exit 1.
-- **Login manual.** Login DeepSeek tidak diotomatiskan karena butuh manusia di browser.
+**Proxy saja:** `install.ps1 -SkipRouter` lalu `npm start`. Endpoint `http://127.0.0.1:9655/v1`,
+dashboard `http://127.0.0.1:9655/dashboard`.
 
-| Flag | Efek |
-|---|---|
-| `-Check` | Laporan keadaan saja, tidak memasang apa pun. Berguna saat diagnosa |
-| `-SkipRouter` | Proxy saja, tanpa 9router. `deepseek-local` tetap jalan |
-| `-SkipShim` | Tidak menulis `deepseek-local.cmd` dan tidak mengubah PATH |
+**Akun tambahan:** `powershell -File local-stack\add-account.ps1 -Name akun2`. Harus email berbeda.
 
-Pintasan setara: `npm run install`. Versi lama `npm run setup` tetap ada tetapi
-hanya langkah 1-3 (tanpa 9router).
-
-### Login DeepSeek
-
-Setelah `npm run auth`, jendela Chrome terbuka di `chat.deepseek.com`:
-
-1. Login dengan akun DeepSeek.
-2. Kirim satu pesan singkat, misalnya `ok`, supaya sesi chat aktif.
-3. Kembali ke terminal dan tekan Enter.
-
-Hasilnya `deepseek-auth.json` (mode `0600`, git-ignored). Jangan pernah commit file itu.
-
-Perbarui token tanpa login ulang (profil Chrome masih tersimpan):
-
-```powershell
-npm run auth
-```
-
-### Tanpa shim
-
-Kalau `-SkipShim` dipakai, atau PATH belum dimuat di terminal lama, panggil langsung:
-
-```bat
-local-stack\Start-All.bat     :: nyalakan semua
-local-stack\Verify-All.bat    :: cek rantai penuh
-local-stack\Stop-All.bat      :: matikan semua
-```
-
-Atau lewat PowerShell, tanpa PATH:
-
-```powershell
-powershell -File local-stack\deepseek-local.ps1 start
-```
-
-### Proxy saja (tanpa 9router)
-
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1 -SkipRouter
-npm run auth
-npm start
-```
-
-Endpoint: `http://127.0.0.1:9655/v1` plus dashboard di
-`http://127.0.0.1:9655/dashboard`. Tanpa 9router, arahkan klien langsung ke
-port 9655, bukan 20128.
-
-### Akun kedua dan seterusnya
-
-Rotasi akun bekerja tanpa kode tambahan. Tambah login dengan:
-
-```powershell
-powershell -File local-stack\add-account.ps1 -Name akun2
-```
-
-File tersimpan di `accounts/akun2.json` dan otomatis dimuat saat start. Akun harus
-benar-benar berbeda email. Detail profil Chrome per akun:
-[local-stack/README.md](local-stack/README.md).
-
-### Upgrade dari clone lama
-
-```powershell
-git pull --ff-only
-powershell -ExecutionPolicy Bypass -File install.ps1
-```
-
-Installer tidak menyentuh `settings.local.ps1`, `deepseek-auth.json`, atau isi
-`data/`, jadi tuning dan sesi yang ada tetap.
-
----
-
-## Cara kerja
-
-Rantai penuh:
-
-```
-klien → 9router (20128) → FreeDeepseekAPI (9655) → web DeepSeek
-```
-
-Tiga lapis:
-
-1. **`server.js` + `lib/`** — proxy: streaming, parsing tool-call, recovery sesi,
-   kompaksi konteks, POW, image safety.
-2. **`public/dashboard/` + `scripts/`** — dashboard, auth, doctor, TUI menu,
-   updater.
-3. **`local-stack/`** — launcher PowerShell: start/stop/verify rantai, patch
-   9router otomatis, `settings.local.ps1`.
-
-### Sesi
-
-Proxy tidak membuka chat DeepSeek baru setiap request.
-
-- Satu `x-agent-session`, `session`, atau `user` = satu chat DeepSeek.
-- Chat yang sudah ada dilanjutkan dengan `parent_message_id`.
-- System prompt dan daftar tool dikirim ke upstream **sekali**. Giliran
-  berikutnya hanya mengirim turn user/tool baru.
-- Balasan kosong, tool-call rusak, atau timeout **mempertahankan** chat hidup.
-- Retry balasan kosong mengecilkan prompt: `0.6x → 0.45x → 0.3x` untuk kasus
-  biasa, lebih agresif saat overflow atau chat reasoning-only.
-- Balasan yang hanya menarasikan aksi ("Saya akan cek...") tanpa tool call
-  didorong sekali dengan instruksi bertindak, bukan bercerita.
-- Balasan yang hanya berisi rencana bernomor didorong untuk menjalankan langkah
-  pertama. Balasan seperti "Mau saya lanjut?" atau "Saya lanjutkan ya?" dianggap
-  jeda izin, bukan blocker.
-- Pertanyaan izin hanya didorong kalau klien meminta otonomi penuh. Tanpa itu,
-  model tetap boleh bertanya sebelum bertindak.
-- Tool yang sama dipanggil tiga kali dengan argumen identik dianggap loop;
-  model diminta ganti pendekatan atau laporkan blocker.
-- Saat blok guard dimatikan (mode refactor), semua dorongan inisiatif ikut mati
-  supaya jawaban berupa source code tidak diganggu.
-- Chat baru dimulai saat sesi hilang, rantai menyentuh `DEEPSEEK_MAX_MESSAGE_DEPTH`,
-  chat lebih tua dari `DEEPSEEK_SESSION_TTL_MS`, DeepSeek bilang prompt terlalu
-  panjang, atau kamu memanggil `/reset-session`.
-
-### Kompaksi konteks
-
-Prompt panjang dipotong ke `DEEPSEEK_MAX_PROMPT_CHARS` sebelum dikirim. Ini
-bukan potong gunting-buta:
-
-- Turn pertama (tugas awal) dipertahankan, maks 30% budget.
-- 35% turn terbaru verbatim.
-- Turn tengah diringkas, anchor tetap: path file, perintah shell, URL, baris
-  error.
-- Kalimat keputusan ("pakai X karena Y", "jangan ubah Z") masuk blok
-  `[decisions]`, terpisah dari anchor. Perintah shell dan tool-call JSON ditolak
-  agar yang tersimpan hanya prosa, bukan mesin.
-- Setiap prompt yang dipadatkan membawa `COMPACTION_NOTICE` yang melarang model
-  mengarang detail yang hilang.
-- Riwayat yang diputar ulang dilabeli `[Recovered record of this conversation...]`
-  supaya sesi hasil rebuild tidak terbaca sebagai riwayat utuh.
-
-Batas jujur: ini **bukan** context window 1M token. Pemadatan bersifat
-ekstraktif (memilih & memotong), bukan abstraktif. Anchor berbasis regex, jadi
-format log tidak lazim bisa lolos tanpa anchor.
-
-### `prompt_tokens` bukan konsumsi DeepSeek
-
-`/admin/requests` dan `/admin/usage` melaporkan **dua** ukuran prompt, karena
-pada sesi sticky keduanya berbeda arti:
-
-| Field | Arti |
-|---|---|
-| `prompt_tokens` | Input **klien**: seluruh `messages[].content` yang dikirim, dibagi 4 |
-| `upstream_prompt_tokens` | Yang benar-benar dikirim proxy ke DeepSeek turn itu |
-| `upstream_prompt_chars` | Sama, dalam karakter |
-| `prompt_amplification` | `prompt_tokens / upstream_prompt_tokens` (agregat `/admin/usage`) |
-
-Angka besar itu normal, bukan bug: OpenCode, Codex, dan Claude Code mengirim ulang
-seluruh transkrip tiap turn, sementara sesi sticky hanya meneruskan delta baru.
-Rasio 4x berarti tiga perempat "prompt token" yang dilaporkan adalah konteks yang
-tidak pernah diterima model. Pakai `upstream_prompt_tokens` kalau ingin beban
-nyata ke DeepSeek.
-
-Tidak satu pun dari keduanya tagihan DeepSeek. Lane web tidak punya meter token,
-jadi `cached_tokens` selalu `0` dan `usd` hanya estimasi.
-
-### Ledger memori sesi
-
-Kalau kompaksi membuang satu turn, path, perintah, dan error di dalamnya
-disimpan ke `session.memory` (cap `DEEPSEEK_MAX_MEMORY_CHARS`, default 16000,
-persist di `data/sessions.json`). Kalimat keputusan disimpan terpisah di
-`session.decisions` (cap 4000 karakter, maks 100 baris) dan dirender sebagai
-blok `[decisions]` di bawah header memori. Ledger ini diputar ulang di kepala
-prefix recovery pada reset/rebuild berikutnya.
-
-`extractDecisions()` butuh dua syarat: baris memuat pemicu keputusan (Inggris
-atau Indonesia) **dan** bukan baris mesin. Baris yang diawali `arguments:`,
-memuat `{"command"`, path absolut, atau kata kerja shell (`node`, `npm`, `git`)
-ditolak. Tanpa filter itu, 189 anchor nyata menghasilkan 3 "keputusan" palsu:
-dua tool-call JSON dan satu potongan tengah kata.
-
-Dengan `DEEPSEEK_SHARED_MEMORY_CHARS > 0`, anchor yang sama juga masuk ke
-`data/shared-memory.json`. Agent key yang benar-benar baru mewarisinya lewat
-prefix recovery — jadi sesi baru langsung tahu fakta proyek.
+**Upgrade:** `git pull --ff-only` lalu `install.ps1` ulang. Tuning dan sesi tidak disentuh.
 
 ---
 
@@ -309,266 +76,26 @@ prefix recovery — jadi sesi baru langsung tahu fakta proyek.
 |---|---|
 | Nyalakan semua | `deepseek-local` atau `deepseek-local start` |
 | Matikan semua | `deepseek-local off` (alias `stop`) |
-| Restart | `deepseek-local restart` — tunggu port benar-benar bebas |
+| Restart | `deepseek-local restart` |
 | Status | `deepseek-local status` |
-| Cek rantai | `deepseek-local verify` — harus `CHAIN_OK` |
-| Login ulang DeepSeek | `npm run auth` |
+| Cek rantai | `deepseek-local verify` |
+| Login ulang | `npm run auth` |
 | Diagnosa | `npm run doctor` |
-| Tes unit | `node --test tests/unit.test.js` — 147 pass, 0 fail |
-| Tes konkurensi | `node --test tests/concurrency.test.js` — 18 pass, 0 fail |
-| Tes inisiatif | `node --test tests/initiative*.test.js` - 18 pass, 0 fail |
-| Tes penuh | `npm test` - 417 pass, 13 fail (baseline) |
-
-Menyalakan yang sudah menyala aman: `start.ps1` mendeteksi port dan tidak
-menjalankan proses kedua.
-
-`restart` tidak sekadar tidur — ia menunggu sampai port 9655 dan 20128 benar-benar
-tidak lagi `Listen` (socket `TIME_WAIT` masih menjawab probe dan dulu membuat
-`start.ps1` mengira stack sudah hidup).
-
----
-
-## Struktur repo
-
-```
-<repo root>/
-├── server.js            # proxy (port 9655)
-├── lib/                 # pow, updater, context compaction, classify (error upstream)
-├── public/, docs/, tests/, integrations/
-├── scripts/
-│   ├── start.js         # launcher: npm start
-│   ├── setup.ps1        # setup Windows sekali jalan
-│   └── install-shim.ps1 # menulis perintah deepseek-local
-├── local-stack/         # launcher rantai penuh
-│   ├── Start-All.bat / Stop-All.bat / Verify-All.bat
-│   ├── start.ps1 / stop.ps1 / verify.ps1 / status.ps1
-│   ├── deepseek-local.ps1, add-account.ps1
-│   ├── patch-deepseek.ps1, clear-stale-errors.ps1
-│   └── README.md, CONTEXT-MEMORY.md, REFACTOR-MODE.md
-└── 9router-source/      # opsional: checkout 9router (git-ignored)
-```
-
-Skrip di `local-stack/` me-resolve proxy sebagai folder induknya (`..`), jadi repo
-bisa dipindah/di-clone di mana saja. Override lewat `$env:FREEDEEPSEEK_DIR`.
-
-### Di mana 9router jalan
-
-`start.ps1` memilih 9router dengan urutan:
-
-| Urutan | Lokasi | Kapan |
-|---|---|---|
-| 1 | `$env:NINEROUTER_APP` | kamu set sendiri, selalu menang |
-| 2 | `9router-source\cli\app` | ada build dari checkout di repo ini |
-| 3 | `%APPDATA%\npm\node_modules\9router\app` | `npm i -g 9router` |
-
-Build lokal didahulukan supaya edit di `9router-source/` lalu build ulang
-benar-benar berpengaruh. State runtime 9router tetap di `%APPDATA%\9router`
-(SQLite, backup patch), jadi upgrade 9router tidak menyentuh akun atau setting.
-
-### Build 9router dari checkout (Node 24+)
-
-```powershell
-cd 9router-source
-npm install --ignore-scripts
-cd cli; npm install --ignore-scripts; cd ..
-npm run cli:pack
-```
-
-`--ignore-scripts` aman: `src/lib/db/driver.js` melewati `better-sqlite3` di
-Node 24+ dan memakai `node:sqlite` bawaan.
-
-Lengkapi bundle seperti `assemble.sh` di Linux, karena `build-cli.js` hanya
-menyalin sebagian kecil `src/` padahal `custom-server.js` memuat beberapa modul
-lewat path absolut:
-
-```powershell
-cd 9router-source
-$app = "cli\app"
-Remove-Item "$app\src" -Recurse -Force; Copy-Item src "$app\src" -Recurse -Force
-Remove-Item "$app\scripts" -Recurse -Force; Copy-Item scripts "$app\scripts" -Recurse -Force
-Copy-Item CHANGELOG.md "$app\CHANGELOG.md" -Force
-Remove-Item "$app\node_modules\next" -Recurse -Force
-Copy-Item node_modules\next "$app\node_modules\next" -Recurse -Force
-```
-
-Tanpa itu: `AuthGuard load failed: ENOENT ...node_modules\next\server.js`, atau
-server diam-diam membaca modul dari `9router-source/src`.
-
-**Build ulang = patch ulang.** `patch-deepseek.ps1` menulis ulang chunk JS yang
-memuat `https://api.deepseek.com/...`, dan build ulang menghasilkan chunk baru
-dengan URL asli. `start.ps1` sudah mem-patch setiap launch, jadi cukup restart.
-
----
-
-## Konfigurasi sesi
-
-`start.ps1` me-*dot-source* `local-stack\settings.local.ps1` setiap kali jalan.
-Nilai di situ ikut ke proses proxy dan bertahan setelah reboot — tidak perlu
-mengekspor env var manual.
-
-```powershell
-Copy-Item local-stack\settings.local.example.ps1 local-stack\settings.local.ps1
-```
-
-Kalau file itu rusak, `start.ps1` hanya memberi peringatan lalu lanjut dengan
-default — stack tidak ikut mati gara-gara satu baris salah.
-
-**Clone baru tidak punya `settings.local.ps1`** (file itu git-ignored). `npm run
-setup` menyalin contohnya, dan isi contoh itu adalah nilai di bawah. Jadi clone
-baru langsung dapat tuning ini tanpa mengedit apa pun; kalau kamu ingin nilai
-bawaan kode (`server.js`), hapus file itu. Nilai bawaan kode ada di
-[tabel env](#konfigurasi-env).
-
-Untuk host yang dipakai banyak orang sekaligus, jangan pakai nilai di bawah.
-Salin `settings.shared.example.ps1` sebagai gantinya:
-
-```powershell
-Copy-Item local-stack\settings.shared.example.ps1 local-stack\settings.local.ps1
-deepseek-local restart
-```
-
-Bedanya: TTL 12 jam (bukan 7 hari), 150 pesan per chat, replay 200k, plafon
-prompt 200k, cooldown akun kembali 10 menit, dan ledger proyek bersama dimatikan.
-Batas kerasnya bukan CPU/RAM: **satu login DeepSeek melayani satu chat in-flight**.
-Sepuluh pengguna butuh sepuluh login, atau mereka mengantre. Hitung login dulu,
-baru tuning.
-
-Nilai yang dipakai di mesin ini (dan di `settings.local.example.ps1`):
-
-| Variabel | Nilai | Arti |
-|---|---|---|
-| `DEEPSEEK_SESSION_TTL_MS` | `604800000` | Chat dipakai 7 hari sebelum diganti |
-| `DEEPSEEK_MAX_MESSAGE_DEPTH` | `400` | 400 pesan per chat sebelum reset paksa |
-| `DEEPSEEK_MAX_HISTORY_MESSAGES` | `400` | 400 giliran lokal diputar ulang |
-| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Anggaran karakter untuk replay. Dipotong otomatis ke 35% plafon prompt |
-| `DEEPSEEK_AUTO_COMPACT` | on | Saat riwayat melebihi anggaran, fakta dari giliran terlama (path, perintah, error) disimpan dulu ke ledger sebelum dibuang. `0` = trim lama yang lossy |
-| `DEEPSEEK_MAX_PROMPT_CHARS` | `480000` | Plafon prompt ke upstream |
-| `DEEPSEEK_REQUEST_DEADLINE_MS` | `300000` | Deadline per request |
-| `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `30000` | Cooldown akun saat rate limit |
-| `DEEPSEEK_SHARED_MEMORY_CHARS` | `16000` | Ledger memori proyek bersama |
-
-Dua hal yang wajib naik bersama: `DEEPSEEK_MAX_HISTORY_MESSAGES` dan
-`DEEPSEEK_MAX_MESSAGE_DEPTH`. Menaikkan depth saja tidak ada gunanya — saat chat
-diganti, replay dulu dipatok di 100 entri, jadi sesi "400 pesan" tetap hanya
-memulihkan 100 giliran terakhir.
-
-Anggaran karakter replay dipotong otomatis ke 35% plafon prompt
-(`HISTORY_BUDGET_SHARE`). Dengan plafon `480000`, anggaran efektifnya `168000`
-karakter — angka di atas itu tidak menambah apa pun karena blok history memang
-hanya boleh memakai 35% prompt; kelebihannya cuma tersimpan lalu dipadatkan lagi
-setiap kali chat dibangun ulang. Plafon 480000 (~128k token) dipilih dari log
-hidup: DeepSeek Web membalas 502 "Сервер занят" untuk prompt di atas ~500–760k
-karakter.
-
-### Auto-compact
-
-Saat riwayat melewati anggaran di atas, giliran tertua dibuang. Dulu itu
-`shift()` biasa: path, perintah, dan pesan error dari giliran awal ikut hilang,
-jadi sesi yang sudah lama berjalan justru tahu lebih sedikit daripada sesi baru.
-Sekarang sebelum dibuang, fakta-fakta itu dipanen ke ledger sesi
-(`memory` / `decisions`), sehingga tetap terbawa saat chat diganti. Fitur ini
-aktif secara default; matikan dengan `DEEPSEEK_AUTO_COMPACT=0`.
-
-Giliran terbaru tidak pernah dibuang, dan hasilnya bisa dilihat per agent:
-
-```bash
-curl -sS http://127.0.0.1:9655/v1/sessions
-# {"agents":[{"agent":"...","history_size":12,"history_chars":24320,
-#            "compactions":3,"last_compacted_at":1762000000000}]}
-```
-
-Cek hasilnya benar-benar aktif:
-
-```
-deepseek-local status
-```
-
-```
-  proxy    UP    port 9655  |  7 account(s), 6 ready
-                 session: ttl 7.0 days, 400 msgs, replays 400 msgs / 480k chars
-```
-
-Atau `curl http://127.0.0.1:9655/health` dan lihat `session_reuse`.
-
----
-
-## Multi-akun
-
-Proxy mendukung banyak akun DeepSeek. Kalau satu kena cooldown, request
-berikutnya otomatis pindah ke akun lain — rotasi bekerja tanpa kode tambahan.
-
-Aturan pool: **satu chat in-flight per login**. Request kedua untuk login sibuk
-menunggu, tidak menimpa. Ini mencegah DeepSeek mem-ban login karena dua chat
-mengirim bersamaan.
-
-### Tambah akun: helper dengan profil Chrome tersimpan
-
-```powershell
-# Akun baru: buka Chrome, login dengan email akun itu, kirim satu prompt
-# singkat, lalu tekan Enter di terminal.
-pwsh -File local-stack\add-account.ps1 -Name akun2 -Restart
-
-# Token mulai 401? Perbarui tanpa login ulang (profil masih ter-log-in):
-pwsh -File local-stack\add-account.ps1 -Name akun2 -Refresh -Restart
-```
-
-- Profil Chrome disimpan di `.chrome-profiles\<nama>` (git-ignored).
-- File auth ditulis ke `accounts\<nama>.json` (git-ignored).
-- Port DevTools otomatis: 9334 + angka di nama.
-- Tanpa Chrome, skrip menawarkan instalasi.
-
-Ini mekanisme yang sama dengan akun utama (`npm run deepseek:auth`): setiap akun
-punya profil Chrome sendiri yang tetap login, jadi token bisa diperbarui kapan
-saja dari sesi hidup — bukan ekspor cookie statis yang cepat hangus.
-
-> **Penting:** Akun harus benar-benar berbeda (email DeepSeek berbeda). Dua file
-> dari akun yang sama tetap berbagi kuota dan tidak menolong.
-
-### Verifikasi
-
-```
-deepseek-local status
-```
-
-```
-  proxy    UP    port 9655  |  2 account(s), 1 ready
-                 cooling down: akun2 (rate_limit), ~24s left
-  9router  UP    port 20128  |  local build v0.5.330
-```
-
-`1 ready` + satu cooling down berarti request masih dilayani akun siap tanpa 429.
-
-### Dashboard
-
-`http://127.0.0.1:9655/dashboard` menampilkan setiap login dengan status
-(`ready`, `busy`, `cooldown`, `disabled`, `no_credentials`), hitung mundur
-cooldown, jumlah gagal, error upstream terakhir, dan usage. Dari situ kamu bisa
-pause/resume login, clear cooldown, dan reload file auth tanpa restart.
 
 ---
 
 ## Model
 
-`GET /v1/models` hanya mendaftar DeepSeek-V4.1-Flash.
+| ID | DeepThink | Web search |
+|---|---|---|
+| `deepseek-v4-flash` | off | on |
+| `deepseek-v4-flash-thinking` | on | on |
+| `deepseek-v4-flash-nosearch` | off | off |
+| `deepseek-v4-flash-thinking-nosearch` | on | off |
 
-| ID | DeepThink | Native web search | Keterangan |
-|---|---|---|---|
-| `deepseek-v4-flash` | off | on | DeepSeek-V4.1-Flash. `deepseek-flash` alias |
-| `deepseek-v4-flash-thinking` | on | on | DeepThink dulu, baru jawab |
-| `deepseek-v4-flash-nosearch` | off | off | Tanpa pencarian |
-| `deepseek-v4-flash-thinking-nosearch` | on | off | DeepThink tanpa pencarian |
-
-Suffix itu adalah dua sakelar di composer DeepSeek. Mereka tidak memilih model
-lain. `"web_search": true|false` di body request menimpa sakelar pencarian id
-mana pun.
-
-Lewat 9router, provider `ds` (DeepSeek) diarahkan ke proxy lokal dengan prefix
-`ds/`. Lewat OpenCode langsung (tanpa 9router), prefix `freedeepseek/`.
-
-ID lama tidak terdaftar dan mengembalikan `400 invalid_model`:
-`deepseek-chat`, `deepseek-reasoner` (pensiun upstream 2026-07-24),
-`deepseek-r1`, `deepseek-v3`, `deepseek-instant`, `deepseek-expert`.
-`deepseek-v4-pro` juga tidak dilayani: Web chat tidak lagi menyediakan bobot Pro.
+`"web_search": true|false` menimpa sakelar pencarian id mana pun. Lewat 9router prefix
+`ds/`; langsung ke proxy prefix `freedeepseek/`. ID lama (`deepseek-chat`, `deepseek-reasoner`,
+dll.) mengembalikan `400 invalid_model`.
 
 ---
 
@@ -576,27 +103,18 @@ ID lama tidak terdaftar dan mengembalikan `400 invalid_model`:
 
 | Method | Path | Fungsi |
 |---|---|---|
-| `GET` | `/health` | Proses hidup. Status akun kalau tanpa proxy key |
-| `GET` | `/readyz` | `200` hanya kalau ada login yang bisa melayani |
-| `GET` | `/dashboard` | Dashboard akun (halaman statis) |
-| `GET` | `/admin/accounts` | Pool dan status per login |
-| `GET` | `/admin/requests` | Log request (filter status/api/agent, paging) |
-| `GET` | `/admin/usage` | Ringkasan token dan biaya |
-| `GET` | `/admin/agents` | Ringkasan sesi agent |
-| `POST` | `/admin/accounts/<id>/{disable,enable,clear-cooldown}` | Pause, resume, un-cool |
-| `POST` | `/admin/accounts/reload` | Baca ulang file auth tanpa restart |
+| `GET` | `/health` | Proses hidup + status akun |
+| `GET` | `/readyz` | `200` hanya kalau ada login siap |
+| `GET` | `/dashboard` | Dashboard akun |
 | `GET` | `/v1/models` | Empat ID DeepSeek-V4.1-Flash |
-| `GET` | `/v1/model-capabilities` | ID, DeepThink, native search |
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/messages` | Anthropic Messages |
 | `POST` | `/v1/responses` | OpenAI Responses |
-| `GET` | `/v1/sessions` | Sesi agent lokal: `history_size`, `history_chars`, `compactions`, `last_compacted_at` |
+| `GET` | `/v1/sessions` | Sesi agent lokal |
 | `POST` | `/reset-session?agent=<id>` | Buang satu chat Web |
-| `POST` | `/reset-session?agent=all` | Buang semua chat Web |
+| `GET` | `/admin/{accounts,requests,usage,agents}` | Admin API |
 
-Setiap request mengembalikan header `x-request-id`. Nilai diambil dari header klien kalau ada (maks 64 karakter), atau dibuat UUID. ID yang sama tercatat di `requestLog` (`/admin/requests`) dan di tag log agent.
-
-Contoh cepat:
+Contoh:
 
 ```bash
 curl -X POST http://127.0.0.1:9655/v1/chat/completions \
@@ -605,229 +123,104 @@ curl -X POST http://127.0.0.1:9655/v1/chat/completions \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-Dokumentasi protokol lengkap: [docs/api.md](docs/api.md) ·
-[docs/models.md](docs/models.md) · [docs/agents.md](docs/agents.md).
+Protokol lengkap: [docs/api.md](docs/api.md) · [docs/models.md](docs/models.md) ·
+[docs/agents.md](docs/agents.md).
 
 ---
 
-## Konfigurasi env
+## Cara kerja
+
+```
+klien → 9router (20128) → FreeDeepseekAPI (9655) → web DeepSeek
+```
+
+Tiga lapis: `server.js` + `lib/` (proxy, parser, recovery, kompaksi, POW),
+`public/dashboard/` + `scripts/` (dashboard, auth, doctor), `local-stack/` (launcher PowerShell).
+
+**Sesi:** satu `x-agent-session`/`session`/`user` = satu chat DeepSeek. System prompt dan
+tool dikirim sekali; giliran berikutnya hanya delta. Balasan kosong/tool-call rusak/timeout
+mempertahankan chat. Chat baru saat sesi hilang, `DEEPSEEK_MAX_MESSAGE_DEPTH` tercapai,
+TTL habis, prompt terlalu panjang, atau `/reset-session`.
+
+**Kompaksi:** prompt dipotong ke `DEEPSEEK_MAX_PROMPT_CHARS`. Turn pertama dipertahankan
+(maks 30%), 35% terbaru verbatim, sisanya diringkas dengan anchor (path, perintah, URL, error).
+Ini ekstraktif, bukan context window 1M token.
+
+**Token:** `prompt_tokens` = input klien; `upstream_prompt_tokens` = yang benar-benar dikirim
+ke DeepSeek. Rasio besar normal untuk klien yang mengirim ulang transkrip tiap turn.
+
+---
+
+## Multi-akun
+
+Rotasi otomatis: satu login kena cooldown, request pindah ke akun lain. Aturan pool:
+**satu chat in-flight per login**; request kedua menunggu, tidak menimpa.
+
+```powershell
+pwsh -File local-stack\add-account.ps1 -Name akun2 -Restart
+pwsh -File local-stack\add-account.ps1 -Name akun2 -Refresh -Restart
+```
+
+Profil Chrome di `.chrome-profiles\<nama>`, auth di `accounts\<nama>.json` (git-ignored).
+Akun harus email berbeda. Dashboard menampilkan status per login dan bisa pause/resume/clear cooldown.
+
+---
+
+## Konfigurasi
+
+`start.ps1` dot-source `local-stack\settings.local.ps1` setiap launch. Clone baru memakai
+`settings.local.example.ps1`.
 
 | Variabel | Default | Arti |
 |---|---|---|
-| `HOST` | `127.0.0.1` | Bind address. Non-loopback tanpa proxy key memberi warning |
+| `HOST` | `127.0.0.1` | Bind address |
 | `PORT` | `9655` | Port listen |
-| `PROXY_API_KEY` | off | Bearer wajib di `/v1/*` dan `/admin/*` |
-| `REQUIRE_PROXY_API_KEY` | off | Tolak start kalau key kosong |
-| `PROXY_CORS_ORIGINS` | loopback | Origin browser tambahan |
-| `PROXY_ADMIN_ALLOW_REMOTE` | off | `1` = `/admin/*` jawab klien non-loopback |
-| `DEEPSEEK_AUTH_PATH` | `./deepseek-auth.json` | Satu file atau daftar koma |
-| `DEEPSEEK_AUTH_DIR` | `./accounts` bila ada | Semua `*.json` di folder itu |
-| `DEEPSEEK_MAX_PROMPT_CHARS` | `800000` (mesin ini `480000`) | Plafon prompt ke upstream. Minimum 16000 |
-| `DEEPSEEK_MAX_RETRIES` | `2` | Retry balasan kosong di chat sama |
+| `PROXY_API_KEY` | off | Bearer wajib untuk `/v1/*` dan `/admin/*` |
+| `DEEPSEEK_MAX_PROMPT_CHARS` | `800000` (mesin ini `480000`) | Plafon prompt upstream |
 | `DEEPSEEK_REQUEST_DEADLINE_MS` | `120000` | Deadline per request |
-| `DEEPSEEK_FETCH_TIMEOUT_MS` | `60000` | Idle timeout per stream upstream |
-| `DEEPSEEK_MAX_CONCURRENT` | `24` | Cap proses. Paralelisme nyata = jumlah login idle |
-| `DEEPSEEK_ACCOUNT_LOCK_WAIT_MS` | `120000` | Lama chat kedua menunggu login sibuk |
 | `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | Cooldown dasar setelah 401/403/rate limit |
-| `DEEPSEEK_AUTH_EXPIRED_COOLDOWN_MS` | `1800000` | Karantina login yang tokennya ditolak dua kali |
-| `DEEPSEEK_COOLDOWN_STATE_PATH` | `./data/cooldowns.json` | Persist cooldown antar restart |
-| `DEEPSEEK_GUARD_BLOCKS` | on | Fallback global blok guard. `off` melemahkan semua request |
-| `DEEPSEEK_SESSION_TTL_MS` | `7200000` | Lama satu chat dipakai ulang |
-| `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Pesan per chat sebelum reset paksa |
-| `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Giliran lokal diputar ulang ke chat pengganti |
-| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Anggaran karakter replay. Dipotong otomatis ke 35% plafon prompt |
-| `DEEPSEEK_AUTO_COMPACT` | on | Auto-compact: fakta giliran yang dibuang disimpan ke ledger sesi lebih dulu. `0` = mati |
-| `DEEPSEEK_MAX_MEMORY_CHARS` | `16000` | Cap ledger memori per sesi |
-| `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Cap ledger memori proyek bersama. `0` = mati |
-| `DEEPSEEK_SESSION_IDLE_EVICT_MS` | `2 × TTL` | Umur sesi idle di disk |
-| `DEEPSEEK_MAX_SESSIONS` | `500` | Cap sesi dimuat saat startup |
-| `TRUST_PROXY` | off | `1` = ambil IP dari `X-Forwarded-For` |
-| `MAX_REQUEST_BODY_BYTES` | `31457280` | Ukuran maksimum body JSON, termasuk base64 |
-| `NON_INTERACTIVE` / `SKIP_ACCOUNT_MENU` | off | Lewati menu launch |
+| `DEEPSEEK_SESSION_TTL_MS` | `7200000` | Lama chat dipakai ulang |
+| `DEEPSEEK_MAX_MESSAGE_DEPTH` | `100` | Pesan per chat sebelum reset |
+| `DEEPSEEK_MAX_HISTORY_MESSAGES` | `100` | Giliran lokal diputar ulang |
+| `DEEPSEEK_MAX_HISTORY_CHARS` | `400000` | Anggaran replay, otomatis dipotong ke 35% plafon prompt |
+| `DEEPSEEK_AUTO_COMPACT` | on | Fakta giliran dibuang disimpan ke ledger dulu |
+| `DEEPSEEK_SHARED_MEMORY_CHARS` | `0` | Ledger memori proyek bersama |
+| `DEEPSEEK_GUARD_BLOCKS` | on | Fallback global guard blocks |
 
----
+Daftar lengkap: [docs/api.md](docs/api.md) dan `server.js`.
 
-## Memori jangka panjang
+**Refactor mode:** `"guard_blocks": false` (body) atau `x-deepseek-guard-blocks: off`.
+Lewat 9router wajib `{"guard_blocks": false, "tool_choice": "none"}` — 9router membuang header klien.
 
-Proxy **tidak punya** memori jangka panjang, dan itu disengaja. Ia lapisan
-transport: meneruskan percakapan dan memutar ulang riwayat lokal yang dibatasi
-saat chat remote mati. Ia tidak memutuskan apa yang layak diingat.
-
-Memori jangka panjang datang dari **system prompt**, karena system prompt
-dikirim ulang setiap request terlepas dari sesi.
-
-| Lapis | Isi | Umur |
-|---|---|---|
-| Session store | Percakapan hari ini | TTL (default 2 jam) |
-| System prompt / `AGENTS.md` | Aturan tetap: gaya, konvensi, larangan | Sampai file diedit |
-| `MEMORY.md` per proyek | Fakta tahan lama: port, perintah, keputusan, jebakan | Sampai file diedit |
-
-Batas praktis untuk memo yang harus diingat presisi: ~80.000 karakter. Di atas
-itu kompaksi mulai memotong.
-
-Aturan yang membuatnya bekerja ada di `AGENTS.md`: *baca `MEMORY.md` sebelum
-perubahan pertama, tambahkan saat menemukan fakta tahan lama*. Memori adalah
-filenya, bukan modelnya.
-
----
-
-## Refactor mode
-
-Proxy menambahkan dua blok ke prompt upstream: `NO-TOOLS CONTRACT` dan
-`TOOL REMINDER`. Satu baris di reminder berbunyi **"Do not paste source files or
-diffs"** — instruksi yang tepat untuk agent, tapi salah untuk refactor, di mana
-jawabannya *adalah* source code.
-
-Mematikan global adalah perbaikan yang salah: itu melemahkan setiap request agent
-hanya untuk satu panggilan refactor. Jadi opt-out-nya **per request**:
-
-| Di mana | Nilai |
-|---|---|
-| Body JSON | `"guard_blocks": false` |
-| Header HTTP | `x-deepseek-guard-blocks: off` (menang atas body) |
-| Fallback env | `DEEPSEEK_GUARD_BLOCKS=off` |
-
-Nilai off yang diterima: `off`, `0`, `false`, `no`, `none`, `disabled`. Default on.
-
-Yang tetap ada saat off: envelope `{"tool_call":...}` ketika tools diiklankan.
-Itu kontrak parsing, bukan aturan gaya; menghapusnya menghasilkan
-`502 malformed_tool_call`.
-
-**Kedua setelan wajib saat lewat 9router:**
-
-```json
-{ "guard_blocks": false, "tool_choice": "none" }
-```
-
-Tanpa `tool_choice: "none"`, model akan memilih `write_file` walaupun guard
-dimatikan — karena tool tersedia, bukan karena teks dilarang.
-
-9router **membuang header klien**, termasuk `x-deepseek-guard-blocks`. Hanya
-field body yang lolos. Header bekerja pada panggilan langsung ke proxy.
-
-Detail dan bukti log: [local-stack/REFACTOR-MODE.md](local-stack/REFACTOR-MODE.md).
-
----
-
-## Mode otonom
-
-Proxy bisa mendorong model menyelesaikan tugas tanpa berhenti di rencana atau
-menunggu izin. Ini **opt-in**, karena banyak klien justru mengharapkan model
-bertanya lebih dulu.
-
-| Di mana | Nilai |
-|---|---|
-| Body JSON | `"agent_autonomy": true` |
-| Header HTTP | `x-agent-autonomy: full` (menang atas body) |
-
-Nilai on yang diterima: `full`, `on`, `1`, `true`, `yes`. Default off.
-
-Yang didorong saat aktif:
-
-| Sinyal | Aksi |
-|---|---|
-| Rencana bernomor tanpa eksekusi | Jalankan langkah pertama |
-| Pertanyaan izin ("mau saya...?") | Lanjutkan, jangan tanya |
-| Tool sama 3x argumen identik | Ganti pendekatan atau lapor blocker |
-
-Yang **tidak** didorong: pertanyaan yang menyebut kredensial, pilihan akun, atau
-aksi ireversibel. Itu blocker nyata dan model tetap boleh bertanya.
-
-Mode ini mati otomatis saat `guard_blocks: false` (refactor mode), karena
-jawaban refactor berupa source code dan dorongan bertindak akan mengganggunya.
-
-Sama seperti guard blocks: **9router membuang header klien**, jadi lewat 9router
-pakai field body `"agent_autonomy": true`.
+**Mode otonom:** `"agent_autonomy": true` atau `x-agent-autonomy: full`. Mati otomatis di refactor mode.
 
 ---
 
 ## Tes
 
 ```powershell
-node --test tests/unit.test.js     # 147 pass, 0 fail
-npm test                           # 417 pass, 13 fail
-node --test tests/concurrency.test.js   # 18 pass, 0 fail
-node --test tests/classify.test.js tests/decision-anchors.test.js   # 10 pass, 0 fail
-node --test tests/initiative*.test.js                                   # 18 pass, 0 fail
+node --test tests/unit.test.js          # 158 pass
+node --test tests/concurrency.test.js    # 18 pass
+npm run test:unit                        # 356 pass (tanpa chrome-setup/agents-api)
 ```
 
-13 kegagalan `npm test` sudah ada sejak baseline upstream — butuh Chrome, macOS,
-atau tooling yang tidak ada di mesin ini. Bukan regresi dari perubahan lokal.
-Pakai `node --test tests/unit.test.js` untuk sinyal bersih.
-
-Live smoke test terhadap proxy yang sudah jalan:
-
-```bash
-BASE_URL=http://127.0.0.1:9655 MODEL=deepseek-v4-flash npm run test:live
-```
+`npm test` di mesin Windows masih gagal di `chrome-setup` (path macOS) dan `agents-api`
+(mode file 0600) — baseline upstream, bukan regresi lokal.
 
 ---
 
 ## Masalah umum
 
-**`npm test` gagal 13 tes.** Baseline, bukan regresi. Pakai
-`node --test tests/unit.test.js`.
-
-**DeepSeek minta login ulang / 401 / 403.** Cookie web kedaluwarsa:
-
-```powershell
-npm run auth
-deepseek-local restart
-```
-
-**9router "tidak mau start".** `cli.js` 9router adalah supervisor: membunuh
-proses di port 20128 saja membuatnya dihidupkan lagi. `start.ps1` memanggil
-`custom-server.js` langsung, jadi tidak ada supervisor atau tray. `stop.ps1`
-membunuh supervisor lebih dulu.
-
-**"Invalid API key" di 9router.** Dua sebab, keduanya sisa konfigurasi lama:
-baris `providerNodes` dengan `id = 'deepseek'` menabrak provider bawaan, dan
-`lastError` 401 plus `modelLock_*` di koneksi lama. Jalankan
-`clear-stale-errors.ps1`.
-
-**Rate limit "Слишком частые сообщения".** DeepSeek membatasi login ~10 menit.
-Itu throttle asli, bukan bug proxy. `DEEPSEEK_ACCOUNT_COOLDOWN_MS` default
-`600000` untuk alasan ini. Mesin ini memakai 30s karena burst throttle biasanya
-pulih dalam 15–30s.
-
-**Prompt panjang dibalas 502 "Сервер занят".** DeepSeek Web menolak prompt di
-atas ~500–760k karakter dengan stream 0 karakter. Plafon efektif di mesin ini
-`480000` karakter.
-
-**Build ulang 9router memutus rantai.** Build ulang menghasilkan chunk dengan URL
-`api.deepseek.com` asli. `start.ps1` mem-patch setiap launch; cukup restart.
-
-**Restart menyisakan proses lama.** Socket `TIME_WAIT` masih menjawab probe.
-`deepseek-local restart` menunggu port benar-benar bebas, bukan tidur tetap.
-
-**Cooldown hilang setelah restart.** Itu perilaku lama. Sekarang cooldown
-dipersist di `data/cooldowns.json` supaya restart tidak bisa dipakai keluar dari
-throttle.
-
-- **Escaping can create duplicate ledger entries.** If a turn carries a JSON
-  string or escaped path that matches a decision anchor, `extractDecisions()`
-  may bank the same fact twice. Dedupe uses exact string equality after
-  stripping the line prefix; verify with raw strings, not rendered output.
-- **Consecutive duplicate turns are real, not test noise.** The loop detector
-  treats identical user/tool turns as a stall and pushes the model to change
-  approach. This fires both in tests and in production when a client retries
-  without advancing the prompt.
-- **Real-agent envelope wrapping is mandatory for tool calls.** The proxy
-  expects `{"tool_call":{...}}` when tools are advertised. Stripping that
-  envelope produces `502 malformed_tool_call`; it is a parsing contract, not a
-  style rule.
-- **OpenCode sends no `x-agent-session` header.** When OpenCode is used
-  directly (not through 9router), the proxy receives no session key and falls
-  back to an `unkeyed-<hash>` session keyed by remote address + User-Agent.
-  Unrelated OpenCode clients therefore never share a chat. 9router itself
-  drops the header, so the same fallback applies there; use the `user` body
-  field when you need explicit session pinning.
+- **401/403:** cookie web kedaluwarsa → `npm run auth` lalu `deepseek-local restart`.
+- **9router tidak start:** supervisor `cli.js` respawn proses; `stop.ps1` bunuh supervisor dulu.
+- **Rate limit "Слишком частые сообщения":** throttle asli DeepSeek ~10 menit, bukan bug proxy.
+- **502 "Сервер занят":** prompt di atas ~500–760k karakter ditolak DeepSeek Web.
+- **Cooldown hilang:** kini dipersist di `data/cooldowns.json`.
+- **Build ulang 9router:** URL `api.deepseek.com` kembali; `start.ps1` mem-patch tiap launch.
 
 ---
 
 ## Lisensi
 
-Apache-2.0.
-
-Fork lokal dari [dekrezz/FreeDeepseekAPI](https://github.com/dekrezz/FreeDeepseekAPI);
-remote `upstream` dipertahankan supaya perubahan upstream tetap bisa ditarik.
+Apache-2.0. Fork lokal dari [dekrezz/FreeDeepseekAPI](https://github.com/dekrezz/FreeDeepseekAPI);
+remote `upstream` dipertahankan untuk menarik perubahan upstream.
