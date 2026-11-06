@@ -6,9 +6,12 @@
   const { h, fmt } = F;
 
   const PREFS = {
+    theme: { key: 'fdsa.theme', attr: 'data-theme', values: ['system', 'light', 'dark'] },
     material: { key: 'fdsa.material', attr: 'data-material', values: ['system', 'glass', 'solid'] },
     density: { key: 'fdsa.density', attr: 'data-density', values: ['comfortable', 'compact'] },
   };
+
+  const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
 
   F.prefs = {
     get(name) {
@@ -19,18 +22,24 @@
     },
     set(name, value) {
       const p = PREFS[name];
-      try { localStorage.setItem(p.key, value); } catch (e) { F.toast(`Could not save the ${name} preference: ${e.name}`, { tone: 'error' }); }
+      try { localStorage.setItem(p.key, value); } catch (e) { F.toast(F.t('Could not save the {name} preference: {error}', { name: F.t({ theme: 'Theme', material: 'Material', density: 'Density' }[name]), error: e.name }), { tone: 'error' }); }
       F.prefs.apply(name, value);
     },
     apply(name, value) {
       const p = PREFS[name];
       const root = document.documentElement;
+      if (name === 'theme') {
+        if (value === 'dark' || (value === 'system' && systemDark.matches)) root.setAttribute(p.attr, 'dark');
+        else root.removeAttribute(p.attr);
+        return;
+      }
       if (value === p.values[0] && name !== 'density') root.removeAttribute(p.attr);
       else root.setAttribute(p.attr, value);
     },
     applyAll() { for (const name of Object.keys(PREFS)) F.prefs.apply(name, F.prefs.get(name)); },
   };
   F.prefs.applyAll();
+  systemDark.addEventListener('change', () => { if (F.prefs.get('theme') === 'system') F.prefs.apply('theme', 'system'); });
 
   const st = { root: null, els: {}, health: null, healthError: null, visible: false, snippet: 'openai',
     update: { status: null, error: null, channel: null, check: null, phase: 'idle', message: null } };
@@ -44,19 +53,19 @@
     const appearance = h('div', { class: 'set-group' });
     const chat = h('div', { class: 'set-stack' });
     root.append(h('div', { class: 'view-pad settings' },
-      section('Access key', 'The PROXY_API_KEY this dashboard signs its requests with.', key),
-      section('Connection', 'Point any OpenAI- or Anthropic-compatible client at this proxy.', conn),
-      section('Server', 'Facts from GET /health.', server),
-      section('Updates', 'Stable gets a release once it has been checked. Latest gets every release first.', updates),
-      section('Appearance', null, appearance),
-      section('Chat data', `Stored in this browser only, for ${location.origin}. 127.0.0.1 and localhost keep separate stores.`, chat)));
+      section(F.t('Access key'), F.t('The PROXY_API_KEY this dashboard signs its requests with'), key),
+      section(F.t('Connection'), F.t('Point any OpenAI- or Anthropic-compatible client at this proxy'), conn),
+      section(F.t('Server'), F.t('Facts from GET /health'), server),
+      section(F.t('Updates'), F.t('Stable gets a release once it has been checked. Latest gets every release first.'), updates),
+      section(F.t('Appearance'), null, appearance),
+      section(F.t('Chat data'), F.t('Stored in this browser only, for {origin}. 127.0.0.1 and localhost keep separate stores.', { origin: location.origin }), chat)));
     Object.assign(st.els, { key, conn, server, updates, appearance, chat });
     F.on('accounts', () => { if (st.visible) renderServer(); });
   }
 
   function section(title, lead, body) {
     return h('section', { class: 'settings-section' },
-      h('header', { class: 'settings-head' }, h('h2', { class: 'settings-title', text: title }), lead ? h('p', { class: 'settings-desc', text: lead }) : null),
+      h('header', { class: 'settings-head' }, h('h2', { class: 'settings-title' }, h('span', { text: title })), lead ? h('p', { class: 'settings-desc', text: lead }) : null),
       body);
   }
 
@@ -64,7 +73,7 @@
   function row(label, hint, control, cls, icon) {
     return h('div', { class: ['set-row', cls, icon && 'has-icon'] },
       icon ? h('span', { class: 'set-icon', 'aria-hidden': 'true' }, F.icon(icon)) : null,
-      h('div', { class: 'set-text' }, h('span', { class: 'set-label', text: label }), hint ? (hint instanceof Node ? hint : h('span', { class: 'set-hint', text: hint })) : null),
+      h('div', { class: 'set-text' }, h('span', { class: 'set-label', text: F.t(label) }), hint ? (hint instanceof Node ? hint : h('span', { class: 'set-hint', text: F.t(hint) })) : null),
       control == null || control === '' ? null : h('div', { class: 'set-control' }, control instanceof Node ? control : String(control)));
   }
 
@@ -82,43 +91,43 @@
     const paint = (key, preview) => {
       header.classList.toggle('is-preview', Boolean(preview));
       header.classList.toggle('is-empty', !key);
-      if (!key) { value.replaceChildren(h('span', { class: 'auth-none', text: 'not sent' })); return; }
+      if (!key) { value.replaceChildren(h('span', { class: 'auth-none', text: F.t('not sent') })); return; }
       const { dots, tail } = maskKey(key);
       value.replaceChildren(h('span', { class: 'auth-scheme', text: 'Bearer ' }), h('span', { class: 'auth-dots', text: dots }), h('span', { class: 'auth-tail', text: tail }));
     };
     paint(stored, false);
 
-    const input = h('input', { type: 'password', class: 'input auth-input', id: 'settings-key', autocomplete: 'off', spellcheck: 'false', placeholder: stored ? 'Paste a new key to replace it' : 'Paste PROXY_API_KEY' });
+    const input = h('input', { type: 'password', class: 'input auth-input', id: 'settings-key', autocomplete: 'off', spellcheck: 'false', placeholder: stored ? F.t('Paste a new key to replace it') : F.t('Paste PROXY_API_KEY') });
     input.addEventListener('input', () => { const v = input.value.trim(); paint(v || stored, Boolean(v)); });
-    const reveal = F.iconBtn('eye', 'Show key', { cls: 'auth-reveal' });
+    const reveal = F.iconBtn('eye', F.t('Show key'), { cls: 'auth-reveal' });
     reveal.setAttribute('aria-pressed', 'false');
     reveal.setAttribute('aria-controls', 'settings-key');
     reveal.addEventListener('click', () => {
       const show = input.type === 'password';
       input.type = show ? 'text' : 'password';
       reveal.replaceChildren(F.icon(show ? 'eye-off' : 'eye'));
-      const label = show ? 'Hide key' : 'Show key';
+      const label = show ? F.t('Hide key') : F.t('Show key');
       reveal.setAttribute('aria-label', label);
       reveal.setAttribute('data-tip', label);
       reveal.setAttribute('aria-pressed', String(show));
       input.focus();
     });
-    const save = F.btn(stored ? 'Replace key' : 'Save key', { kind: 'primary', type: 'submit' });
+    const save = F.btn(stored ? F.t('Replace key') : F.t('Save key'), { kind: 'primary', type: 'submit' });
     const form = h('form', { class: 'auth-form' },
-      h('label', { class: 'sr-only', for: 'settings-key', text: 'Access key' }),
+      h('label', { class: 'sr-only', for: 'settings-key', text: F.t('Access key') }),
       h('span', { class: 'auth-field' }, input, reveal), save);
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const v = input.value.trim();
       if (!v) { input.focus(); return; }
-      try { F.key.set(v); } catch (err) { F.toast(`Could not store the key: ${err.name}`, { tone: 'error' }); return; }
+      try { F.key.set(v); } catch (err) { F.toast(F.t('Could not store the key: {name}', { name: err.name }), { tone: 'error' }); return; }
       input.value = '';
-      F.toast('Saved the key for this tab.', { tone: 'success' });
+      F.toast(F.t('Saved the key for this tab.'), { tone: 'success' });
       F.refresh();
       render();
     });
-    const forget = stored ? F.iconBtn('trash', 'Forget key', { cls: 'auth-forget' }) : null;
-    if (forget) forget.addEventListener('click', () => { F.key.clear(); F.toast('Forgot the key. Requests from this tab now go without one.'); F.refresh(); render(); });
+    const forget = stored ? F.iconBtn('trash', F.t('Forget key'), { cls: 'auth-forget' }) : null;
+    if (forget) forget.addEventListener('click', () => { F.key.clear(); F.toast(F.t('Forgot the key. Requests from this tab now go without one.')); F.refresh(); render(); });
 
     st.els.key.replaceChildren(h('div', { class: 'set-group auth' },
       h('div', { class: 'auth-head' }, header, forget),
@@ -136,7 +145,7 @@
     };
     const lang = h('span', { class: 'code-lang' });
     const code = h('code');
-    const copy = h('button', { type: 'button', class: 'code-btn' }, F.icon('copy'), h('span', { class: 'btn-label', text: 'Copy' }));
+    const copy = h('button', { type: 'button', class: 'code-btn' }, F.icon('copy'), h('span', { class: 'btn-label', text: F.t('Copy') }));
     copy.addEventListener('click', () => F.copy(snippets[st.snippet].code, copy));
     const show = (name) => {
       st.snippet = name;
@@ -144,12 +153,12 @@
       code.replaceChildren(...F.colorize(snippets[name].code, snippets[name].lang));
       copy.setAttribute('aria-label', `Copy the ${snippets[name].label} example`);
     };
-    const tabs = F.segmented('Client example', Object.entries(snippets).map(([value, s]) => ({ value, label: s.label })), st.snippet, show);
+    const tabs = F.segmented(F.t('Client example'), Object.entries(snippets).map(([value, s]) => ({ value, label: s.label })), st.snippet, show);
     tabs.classList.add('segmented-sm');
     show(st.snippet);
-    const urlValue = h('span', { class: 'set-url' }, h('code', { class: 'mono-id', text: `${base}/v1` }), F.copyBtn(`${base}/v1`, 'Copy base URL'));
+    const urlValue = h('span', { class: 'set-url' }, h('code', { class: 'mono-id', text: `${base}/v1` }), F.copyBtn(`${base}/v1`, F.t('Copy base URL')));
     st.els.conn.replaceChildren(
-      h('div', { class: 'set-group' }, row('Base URL', 'OpenAI-style clients use /v1. Anthropic SDKs take the origin without /v1.', urlValue)),
+      h('div', { class: 'set-group' }, row(F.t('Base URL'), F.t('OpenAI-style clients use /v1. Anthropic SDKs take the origin without /v1.'), urlValue)),
       h('div', { class: 'codeblock set-code' },
         h('div', { class: 'code-head' }, tabs, h('span', { class: 'code-actions' }, lang, copy)),
         h('pre', { class: 'code-pre code-vs', tabindex: '0' }, code)),
@@ -168,9 +177,9 @@
 
   function renderServer() {
     const host = st.els.server;
-    if (st.healthError) { host.replaceChildren(F.notice('crit', 'GET /health failed', F.errorText(st.healthError))); return; }
+    if (st.healthError) { host.replaceChildren(F.notice('crit', F.t('GET /health failed'), F.errorText(st.healthError))); return; }
     const hl = st.health;
-    if (!hl) { host.replaceChildren(h('div', { class: 'set-group' }, row('Status', null, h('span', { class: 'quiet', text: 'Loading…' }), null, 'live'))); return; }
+    if (!hl) { host.replaceChildren(h('div', { class: 'set-group' }, row('Status', null, h('span', { class: 'quiet', text: F.t('Loading…') }), null, 'live'))); return; }
     if (!hl.models) {
       host.replaceChildren(h('div', { class: 'set-group' }, row('Status', `The proxy answered "${hl.status}". Details need the access key.`, hl.status, null, 'live')));
       return;
@@ -196,14 +205,14 @@
     const tag = (icon, text) => h('span', { class: 'model-tag' }, F.icon(icon), text);
     return h('div', { class: 'set-group model-table' },
       h('div', { class: 'model-head' },
-        h('span', { class: 'set-label', text: 'Models' }),
+        h('span', { class: 'set-label', text: F.t('Models') }),
         h('span', { class: 'set-hint', text: `${models.length} available` })),
       h('ul', { class: 'model-rows', role: 'list' }, models.map(m => h('li', { class: 'model-row' },
         h('img', { class: 'model-logo', src: '/dashboard/logo.png', alt: '', width: '20', height: '20' }),
         h('code', { class: 'model-id mono-id', text: m }),
         h('span', { class: 'model-tags' },
-          /-thinking(?:-|$)/.test(m) ? tag('think', 'DeepThink') : null,
-          /-search(?:-|$)/.test(m) ? tag('search-web', 'Search') : null),
+          /-thinking(?:-|$)/.test(m) ? tag('think', F.t('DeepThink')) : null,
+          /-search(?:-|$)/.test(m) ? tag('search-web', F.t('Search')) : null),
         F.copyBtn(m, `Copy ${m}`)))));
   }
 
@@ -247,13 +256,43 @@
     renderUpdates();
   }
 
+  // What check() already reported, repeated on the confirm button before anything is merged.
+  function installConfirmText(c) {
+    const label = CHANNEL_LABEL[c.channel] || c.channel;
+    const version = c.available && c.available.version ? `v${c.available.version}` : '';
+    const commit = (c.available && c.available.commit) || '';
+    const id = [version, commit].filter(Boolean).join(' · ');
+    if (c.switchOnly) return `Switch to ${label}${id ? ` (${id})` : ''}? The code stays the same.`;
+    const changes = Array.isArray(c.changes) ? c.changes : [];
+    const subjects = changes.slice(0, 4).map(ch => ch && ch.subject).filter(Boolean);
+    const extra = changes.length - subjects.length;
+    const listed = subjects.length ? ` ${subjects.join('; ')}${extra > 0 ? `; and ${extra} more` : ''}.` : '';
+    return `Install ${id || 'this update'} on ${label}?${listed}`;
+  }
+
+  // Check is the first step. Install and Switch then ask again, with the same confirm popover as the rest of the page.
+  function confirmInstall(event) {
+    const u = st.update;
+    if (updateBusy(u) || !u.status || u.status.method !== 'git') return;
+    if (!u.check) { checkUpdate(); return; }
+    if (!u.check.canInstall) return;
+    const c = u.check;
+    F.confirm(event.currentTarget, {
+      text: installConfirmText(c),
+      confirmLabel: c.switchOnly ? 'Switch' : 'Install',
+      pendingLabel: c.switchOnly ? 'Switching…' : 'Installing…',
+      danger: false,
+      run: () => installUpdate(),
+    });
+  }
+
   async function installUpdate() {
     const u = st.update;
     if (updateBusy(u) || !u.check || !u.check.canInstall) return;
     u.phase = 'installing'; u.message = null;
     renderUpdates();
     try {
-      const res = await F.api('POST', '/admin/update/install', { body: { channel: u.channel }, timeout: 120000 });
+      const res = await F.api('POST', '/admin/update/install', { body: { channel: u.channel, confirm: true }, timeout: 120000 });
       u.installed = res;
       if (res.switched) {
         // Same code on a new branch: nothing to restart, just show where the copy is now.
@@ -310,26 +349,25 @@
       : s.branch ? [h('span', { text: 'Branch' }), h('code', { class: 'mono-id update-branch', text: s.branch })] : [h('span', { text: 'No channel' })];
     const checkBtn = F.btn(u.phase === 'checking' ? 'Checking…' : 'Check for updates', { kind: 'primary', icon: 'reload', onclick: checkUpdate });
     if (busy || s.method !== 'git') checkBtn.setAttribute('aria-disabled', 'true');
-    // The installed build over the download arrow set in glyphs (glyphfield.js).
+    // The installed build, the check on its right.
     const hero = h('div', { class: 'update-hero' },
       h('div', { class: 'update-hero-body' },
         h('p', { class: 'update-version', text: s.version ? `v${s.version}` : 'Unknown version' }),
         h('p', { class: 'update-where' }, ...where, s.commit ? h('code', { class: 'mono-id', text: s.commit }) : null)),
       s.method === 'git' ? h('div', { class: 'update-hero-action' }, checkBtn) : null);
-    F.glyphField.attach(hero, { mask: { icon: 'download' }, place: 'right', fade: 'headline' });
     if (s.method !== 'git') {
       host.replaceChildren(h('div', { class: 'update-panel' }, hero,
         h('p', { class: 'update-note', text: 'This copy was not installed with git clone (a container image or a downloaded archive), so it cannot update itself. Pull a new image or download the new release.' })));
       return;
     }
-    // Channels as two tiles: what each one gets, the current one marked.
+    // Channels as picker rows: what each one gets, the chosen one checked, the installed one marked.
     const tile = (value, title, desc) => {
       const on = u.channel === value;
       const b = h('button', { type: 'button', class: ['channel-tile', on && 'is-on'], role: 'radio', 'aria-checked': String(on) },
-        h('span', { class: 'channel-dot', 'aria-hidden': 'true' }),
         h('span', { class: 'channel-text' },
           h('span', { class: 'channel-title' }, h('span', { text: title }), s.channel === value ? h('span', { class: 'channel-current', text: 'Current' }) : null),
-          h('span', { class: 'channel-desc', text: desc })));
+          h('span', { class: 'channel-desc', text: desc })),
+        F.icon('check', 'channel-check'));
       b.addEventListener('click', () => { if (busy || u.channel === value) return; u.channel = value; u.check = null; u.phase = 'idle'; u.message = null; renderUpdates(); });
       return b;
     };
@@ -355,7 +393,7 @@
     } else if (c && c.upToDate) {
       panel.append(h('div', { class: 'update-result' }, row(`You're on the newest ${CHANNEL_LABEL[c.channel]} release`, c.available.version ? `v${c.available.version} · ${c.available.commit}` : c.available.commit, null, null, 'success')));
     } else if (c && c.switchOnly) {
-      const switchBtn = F.btn(u.phase === 'installing' ? 'Switching…' : 'Switch', { kind: 'primary', icon: 'route', onclick: installUpdate });
+      const switchBtn = F.btn(u.phase === 'installing' ? 'Switching…' : 'Switch', { kind: 'primary', icon: 'route', onclick: confirmInstall });
       if (!c.canInstall || busy) switchBtn.setAttribute('aria-disabled', 'true');
       panel.append(h('div', { class: 'update-result' },
         row(`Switch to ${CHANNEL_LABEL[c.channel]}`, `You already run this version${c.available.version ? ` (v${c.available.version} · ${c.available.commit})` : ''}. Switching makes this copy follow ${CHANNEL_LABEL[c.channel]} and get its updates.`,
@@ -366,7 +404,7 @@
           manualSteps(c.manualCommand, false)));
       }
     } else if (c) {
-      const installBtn = F.btn(u.phase === 'installing' ? 'Installing…' : 'Install', { kind: 'primary', icon: 'download', onclick: installUpdate });
+      const installBtn = F.btn(u.phase === 'installing' ? 'Installing…' : 'Install', { kind: 'primary', icon: 'download', onclick: confirmInstall });
       if (!c.canInstall || busy) installBtn.setAttribute('aria-disabled', 'true');
       const changes = c.changes.slice(0, 8);
       panel.append(h('div', { class: 'update-result' },
@@ -385,12 +423,16 @@
   function renderAppearance() {
     const pref = (label, hint, name, options) => row(label, hint, F.segmented(label, options, F.prefs.get(name), (v) => F.prefs.set(name, v)));
     st.els.appearance.replaceChildren(
-      pref('Material', 'System follows the reduced-transparency setting of your OS.', 'material', [{ value: 'system', label: 'System' }, { value: 'glass', label: 'Glass', icon: 'material' }, { value: 'solid', label: 'Solid' }]),
-      pref('Density', null, 'density', [{ value: 'comfortable', label: 'Comfortable' }, { value: 'compact', label: 'Compact' }]));
+      pref(F.t('Theme'), null, 'theme', [{ value: 'system', label: F.t('System') }, { value: 'light', label: F.t('Light') }, { value: 'dark', label: F.t('Dark') }]),
+      pref(F.t('Material'), F.t('System follows the reduced-transparency setting of your OS'), 'material', [{ value: 'system', label: F.t('System') }, { value: 'glass', label: F.t('Glass'), icon: 'material' }, { value: 'solid', label: F.t('Solid') }]),
+      pref(F.t('Density'), null, 'density', [{ value: 'comfortable', label: F.t('Comfortable') }, { value: 'compact', label: F.t('Compact') }]),
+      row(F.t('Language'), F.t('Saved in this browser. Chinese is used when the browser language is Chinese and you have not chosen.'),
+        F.segmented(F.t('Language'), [{ value: 'en', label: 'English' }, { value: 'zh', label: '中文' }], F.lang.get(), (v) => { if (v !== F.lang.get()) F.lang.set(v); })));
   }
 
   async function renderChat() {
     const host = st.els.chat;
+    const size = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1)} GB` : b >= 2 ** 20 ? `${Math.round(b / 2 ** 20)} MB` : `${Math.round(b / 1024)} KB`);
     const info = F.chatStore ? await F.chatStore.stats() : null;
     let est = null;
     try { est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null; } catch (e) { est = null; }
@@ -410,9 +452,9 @@
         row('Conversations', null, info ? fmt.int(info.conversations) : '—'),
         row('Messages', null, info ? fmt.int(info.messages) : '—'),
         row('Storage', info && info.mode === 'memory' ? 'Not saved: IndexedDB is unavailable in this browser mode.' : null,
-          info && info.mode === 'memory' ? null : est ? `${fmt.compact(est.usage / 1024)} KB of about ${fmt.compact(est.quota / 1048576)} MB` : 'IndexedDB')),
+          info && info.mode === 'memory' ? null : est ? `${size(est.usage)} of about ${size(est.quota)}` : 'IndexedDB')),
       h('div', { class: 'set-group' },
-        row('Export all conversations', 'Downloads every conversation in this browser as one JSON file.', exportBtn),
+        row('Export all conversations', 'Downloads every conversation in this browser as one JSON file', exportBtn),
         row('Delete all conversations', 'Removes them from this browser. This can\'t be undone.', delBtn)));
   }
 
@@ -426,7 +468,7 @@
   }
 
   F.views.settings = {
-    title: 'Settings',
+    title: () => F.t('Settings'),
     live: false,
     mount,
     show() { st.visible = true; render(); loadHealth(); loadUpdate(); },

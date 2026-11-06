@@ -5,7 +5,7 @@
 <h1 align="center">FreeDeepseekAPI</h1>
 
 <p align="center">
-  <strong>Local OpenAI-compatible API proxy for DeepSeek Web Chat</strong>
+  <strong>Use your free DeepSeek account as an API</strong>
 </p>
 
 <p align="center">
@@ -13,7 +13,6 @@
   <img alt="Node.js 18 plus" src="https://img.shields.io/badge/node-18%2B-339933.svg" />
   <img alt="No npm dependencies" src="https://img.shields.io/badge/dependencies-0-blue.svg" />
   <img alt="OpenAI compatible" src="https://img.shields.io/badge/OpenAI-compatible-111111.svg" />
-  <img alt="DeepSeek V4.1 Flash" src="https://img.shields.io/badge/DeepSeek-V4.1--Flash-4d6bfe.svg" />
 </p>
 
 <p align="center">

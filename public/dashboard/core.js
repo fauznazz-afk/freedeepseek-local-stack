@@ -8,6 +8,12 @@
   'use strict';
 
   const F = window.FDSA = window.FDSA || {};
+  if (typeof F.t !== 'function') F.t = (key, vars) => {
+    let s = key == null ? '' : String(key);
+    if (vars) s = s.replace(/\{(\w+)\}/g, (m, name) => (Object.prototype.hasOwnProperty.call(vars, name) && vars[name] != null ? String(vars[name]) : m));
+    return s;
+  };
+  if (!F.lang) F.lang = { get() { return 'en'; }, set() {} };
   const SVGNS = 'http://www.w3.org/2000/svg';
   const KEY_STORAGE = 'freedeepseek.proxyKey';
   const POLL_MS = 5000;
@@ -150,23 +156,24 @@
     ago(ts, now = F.now()) {
       if (!ts) return '—';
       const d = Math.max(0, now - ts) / 1000;
-      if (d < 5) return 'just now';
-      if (d < 60) return `${Math.floor(d)}s ago`;
-      if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-      if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-      return `${Math.floor(d / 86400)}d ago`;
+      if (d < 5) return F.t('just now');
+      if (d < 60) return F.t('{n}s ago', { n: Math.floor(d) });
+      if (d < 3600) return F.t('{n}m ago', { n: Math.floor(d / 60) });
+      if (d < 86400) return F.t('{n}h ago', { n: Math.floor(d / 3600) });
+      return F.t('{n}d ago', { n: Math.floor(d / 86400) });
     },
     shortModel: (id) => (id ? String(id).replace(/^deepseek-v4-/, '') : '—'),
     endpoint(path) {
-      if (path === '/v1/chat/completions') return 'OpenAI chat';
-      if (path === '/v1/messages') return 'Anthropic messages';
-      if (path === '/v1/responses') return 'Responses';
+      if (path === '/v1/chat/completions') return F.t('OpenAI chat');
+      if (path === '/v1/messages') return F.t('Anthropic messages');
+      if (path === '/v1/responses') return F.t('Responses');
       return path || '—';
     },
     api(api) {
-      return { openai: 'OpenAI chat', anthropic: 'Anthropic messages', responses: 'Responses' }[api] || api || '—';
+      const label = { openai: 'OpenAI chat', anthropic: 'Anthropic messages', responses: 'Responses' }[api];
+      return label ? F.t(label) : (api || '—');
     },
-    cooldownReason: (r) => ({ rate_limit: 'rate limit', auth: 'auth error' }[r] || r || 'cooldown'),
+    cooldownReason: (r) => F.t({ rate_limit: 'rate limit', auth: 'auth error' }[r] || r || 'cooldown'),
   };
 
   // ---------------------------------------------------------------- clock
@@ -212,7 +219,7 @@
     let message;
     if (typeof err === 'string') message = err;
     else if (err && err.message) message = err.message;
-    else message = `${endpoint} answered HTTP ${res.status}${text && !body ? `: ${text.slice(0, 200)}` : ''}.`;
+    else message = F.t('{endpoint} answered HTTP {status}{extra}.', { endpoint, status: res.status, extra: text && !body ? `: ${text.slice(0, 200)}` : '' });
     const ra = Number(res.headers.get('retry-after'));
     return new ApiError(message, {
       status: res.status,
@@ -225,8 +232,8 @@
 
   F.networkError = (e, endpoint) => new ApiError(
     e && e.name === 'AbortError' && e.timeout
-      ? `${endpoint} did not answer within ${Math.round(e.timeout / 1000)}s.`
-      : `Can't reach the proxy at ${location.host} (${(e && e.name) || 'Error'}).`,
+      ? F.t('{endpoint} did not answer within {sec}s.', { endpoint, sec: Math.round(e.timeout / 1000) })
+      : F.t("Can't reach the proxy at {host} ({name}).", { host: location.host, name: (e && e.name) || 'Error' }),
     { status: 0, type: 'network', endpoint },
   );
 
@@ -257,7 +264,7 @@
     try {
       return text ? JSON.parse(text) : {};
     } catch (e) {
-      throw new ApiError(`${endpoint} sent a response that is not JSON.`, { status: res.status, type: 'invalid_response', endpoint });
+      throw new ApiError(F.t('{endpoint} sent a response that is not JSON.', { endpoint }), { status: res.status, type: 'invalid_response', endpoint });
     }
   };
 
@@ -286,11 +293,11 @@
     document.getElementById('app').setAttribute('inert', '');
     document.getElementById('gate-key').hidden = mode !== 'key';
     document.getElementById('gate-forbidden').hidden = mode !== 'forbidden';
-    document.getElementById('gate-title').textContent = mode === 'key' ? 'Enter the proxy access key' : 'This browser is not allowed to use the admin API';
+    document.getElementById('gate-title').textContent = mode === 'key' ? F.t('Enter the proxy access key') : F.t('This browser is not allowed to use the admin API');
     document.getElementById('gate-key-text').textContent = gate.keyRejected
-      ? 'The saved key was refused by the server. Enter the current PROXY_API_KEY.'
-      : 'This proxy has PROXY_API_KEY set. The key is kept in this tab only and sent as a Bearer header.';
-    document.getElementById('gate-server-message').textContent = serverMessage ? `Server: ${serverMessage}` : '';
+      ? F.t('The saved key was refused by the server. Enter the current PROXY_API_KEY.')
+      : F.t('This proxy has PROXY_API_KEY set. The key is kept in this tab only and sent as a Bearer header.');
+    document.getElementById('gate-server-message').textContent = serverMessage ? F.t('Server: {message}', { message: serverMessage }) : '';
     poller.stop();
     if (wasHidden && mode === 'key') requestAnimationFrame(() => document.getElementById('gate-input').focus());
   }
@@ -428,12 +435,12 @@
   // Pool summary sentence pieces shared by the sidebar, Status and Chat.
   F.poolSignal = () => {
     const data = store.accounts;
-    if (!data) return { state: 'disabled', text: store.error ? 'Pool unknown' : 'Loading pool…' };
+    if (!data) return { state: 'disabled', text: store.error ? F.t('Pool unknown') : F.t('Loading pool…') };
     const pool = data.pool;
-    if (!pool.total || pool.total === pool.no_credentials) return { state: 'no_credentials', text: 'No accounts', tone: 'crit' };
-    if (pool.can_serve > 0) return { state: 'ready', text: `${pool.can_serve} of ${pool.total} ready` };
+    if (!pool.total || pool.total === pool.no_credentials) return { state: 'no_credentials', text: F.t('No accounts'), tone: 'crit' };
+    if (pool.can_serve > 0) return { state: 'ready', text: F.t('{ready} of {total} ready', { ready: pool.can_serve, total: pool.total }) };
     const next = pool.next_ready_at ? Math.max(0, (pool.next_ready_at - F.now()) / 1000) : null;
-    return { state: 'cooldown', text: next != null ? `None ready · next in ${F.fmt.clock(next)}` : 'None ready', tone: 'warn', nextSec: next };
+    return { state: 'cooldown', text: next != null ? F.t('None ready · next in {time}', { time: F.fmt.clock(next) }) : F.t('None ready'), tone: 'warn', nextSec: next };
   };
 
   // 1s ticker for countdowns and relative times.
@@ -451,12 +458,21 @@
     return `#/${view}${sub ? `/${encodeURIComponent(sub)}` : ''}${qs ? `?${qs}` : ''}`;
   };
   F.navigate = (view, sub, params) => { location.hash = F.hashFor(view, sub, params); };
+  // The chat that closing the settings window returns to. A first message gives a new chat its id
+  // through replaceHash, which never routes, so the route handler alone would miss it.
+  F.rememberChat = (hash) => { try { localStorage.setItem('fdsa.lastChat', hash); } catch (e) { /* preference only */ } F.lastChatHash = hash; };
+  F.chatToReturnTo = () => {
+    if (F.lastChatHash) return F.lastChatHash;
+    try { const saved = localStorage.getItem('fdsa.lastChat'); if (saved && saved.startsWith('#/chat')) return saved; } catch (e) { /* preference only */ }
+    return '#/chat';
+  };
   // Replace the hash without adding history or re-routing.
   F.replaceHash = (view, sub, params) => {
     F._suppressRoute = true;
     history.replaceState(null, '', F.hashFor(view, sub, params));
     F._suppressRoute = false;
     try { localStorage.setItem('fdsa.lastRoute', location.hash); } catch (e) { /* preference only */ }
+    if (view === 'chat') F.rememberChat(location.hash);
   };
 
   // ---------------------------------------------------------------- clipboard
@@ -464,7 +480,7 @@
     try {
       await navigator.clipboard.writeText(text);
     } catch (e) {
-      F.toast(`Copy failed: ${e.message || e.name}. Select the text and copy it by hand.`, { tone: 'error' });
+      F.toast(F.t('Copy failed: {detail}. Select the text and copy it by hand.', { detail: e.message || e.name }), { tone: 'error' });
       return false;
     }
     if (btn) {
@@ -474,7 +490,7 @@
       const prevIcon = use && use.getAttribute('href');
       const prevLabel = label && label.textContent;
       if (use) use.setAttribute('href', '#i-check');
-      if (label) label.textContent = 'Copied';
+      if (label) label.textContent = F.t('Copied');
       clearTimeout(btn._copyTimer);
       btn._copyTimer = setTimeout(() => {
         btn.classList.remove('is-copied');
@@ -482,11 +498,11 @@
         if (label && prevLabel) label.textContent = prevLabel;
       }, 1500);
     } else {
-      F.toast('Copied');
+      F.toast(F.t('Copied'));
     }
     return true;
   };
-  F.copyBtn = (getText, label = 'Copy') => {
+  F.copyBtn = (getText, label = F.t('Copy')) => {
     const b = F.btn(null, { kind: 'ghost', icon: 'copy', size: 'sm', 'aria-label': label, title: label });
     b.addEventListener('click', (e) => { e.stopPropagation(); F.copy(typeof getText === 'function' ? getText() : getText, b); });
     return b;
@@ -509,7 +525,7 @@
     const t = F.h('div', { class: `toast glass glass-regular toast-${tone}`, role: isError ? 'alert' : null });
     const iconName = { error: 'error-x', success: 'success', warn: 'alert' }[tone] || 'info';
     // One-sentence toasts read as labels: no closing period ("Saved the key for this tab").
-    const text = typeof message === 'string' && /^[^.]+\.$/.test(message) ? message.slice(0, -1) : message;
+    const text = typeof message === 'string' && /^[^。.]+[。.]$/.test(message) ? message.slice(0, -1) : message;
     const body = F.h('div', { class: 'toast-body' }, F.h('p', { class: 'toast-text', text }));
     if (detail) body.append(detail);
     t.append(F.icon(iconName, 'toast-icon'), body);
@@ -524,7 +540,7 @@
     if (action) {
       t.append(F.btn(action.label, { kind: 'ghost', size: 'sm', onclick: () => { action.run(); close(); } }));
     }
-    t.append(F.iconBtn('close', 'Dismiss', { onclick: close, cls: 'icon-btn-sm' }));
+    t.append(F.iconBtn('close', F.t('Dismiss'), { onclick: close, cls: 'icon-btn-sm' }));
     root.append(t);
     const toasts = root.querySelectorAll('.toast:not(.is-out)');
     if (toasts.length > MAX_TOASTS) {
@@ -709,7 +725,7 @@
   F.confirm = (trigger, { text, confirmLabel, pendingLabel, danger = true, run }) => {
     const err = F.h('p', { class: 'inline-error', role: 'alert', hidden: true });
     const ok = F.btn(confirmLabel, { kind: danger ? 'danger' : 'primary' });
-    const cancel = F.btn('Cancel', { kind: 'secondary', onclick: () => F.closePopover() });
+    const cancel = F.btn(F.t('Cancel'), { kind: 'secondary', onclick: () => F.closePopover() });
     const box = F.h('div', { class: 'confirm' }, F.h('p', { class: 'confirm-text', text }), err, F.h('div', { class: 'confirm-actions' }, cancel, ok));
     ok.addEventListener('click', async () => {
       if (ok.getAttribute('aria-busy') === 'true') return;
@@ -794,14 +810,12 @@
   };
 
   // ---------------------------------------------------------------- notices
-  // Page hero for the settings-window views: the page icon in glyphs (glyphfield.js),
-  // a caps headline built from live data, and one quieter line under it.
-  F.pageHero = ({ icon, label }) => {
+  // Page header for the settings-window views: a line built from live data and a quieter one under it.
+  F.pageHero = ({ label }) => {
     const title = F.h('p', { class: 'status-sentence hero-title' });
     const sub = F.h('p', { class: 'hero-sub' });
     const el = F.h('section', { class: 'hero hero-page', 'aria-label': label },
       F.h('div', { class: 'hero-inner' }, F.h('header', { class: 'status-head' }, title, sub)));
-    F.glyphField.attach(el, { mask: { icon }, place: 'right', fade: 'headline' });
     el.set = (headline, detail = '', tone = null) => {
       title.textContent = headline;
       title.classList.toggle('is-crit', tone === 'crit');
@@ -817,7 +831,7 @@
     actions.length ? F.h('div', { class: 'notice-actions' }, actions) : null);
 
   F.endpointMissing = (endpoint) => F.notice('info', null,
-    `This server build doesn't expose ${endpoint}. Update server.js to the version that ships with this dashboard.`);
+    F.t("This server build doesn't expose {endpoint}. Update server.js to the version that ships with this dashboard.", { endpoint }));
 
   F.errorText = (err) => `${err.message}${err.type ? ` (${err.type})` : ''}`;
 
@@ -846,8 +860,8 @@
   // The server replaces secret values with ‹proxy-key› or ‹secret:abc123› before text leaves it.
   const SECRET_TOKEN = /‹(proxy-key|secret:([0-9a-f]{6}))›/g;
   F.SECRET_TOKEN = SECRET_TOKEN;
-  F.secretChip = (kind, fp) => F.h('span', { class: 'secret-chip', title: 'Hidden. Secrets never leave this machine.' },
-    F.icon('lock'), F.h('span', { text: kind === 'proxy-key' ? 'proxy key' : `secret ${fp}` }));
+  F.secretChip = (kind, fp) => F.h('span', { class: 'secret-chip', title: F.t('Hidden. Secrets never leave this machine.') },
+    F.icon('lock'), F.h('span', { text: kind === 'proxy-key' ? F.t('proxy key') : F.t('secret {fp}', { fp }) }));
   function withSecrets(text) {
     if (text.indexOf('‹') < 0) return [text];
     const out = [];
@@ -886,34 +900,46 @@
     });
   };
 
-  F.codeLine = (text) => {
-    const code = F.h('code', { class: 'mono-id', text });
-    // The scrollbar is hidden, so mark clipped sides and let a plain mouse wheel scroll sideways.
-    const mark = () => {
-      const max = code.scrollWidth - code.clientWidth;
-      code.classList.toggle('is-clip-start', max > 1 && code.scrollLeft > 1);
-      code.classList.toggle('is-clip-end', max > 1 && code.scrollLeft < max - 1);
+  // A command wraps at its spaces, continuation lines indented, so all of it is in view and
+  // nothing scrolls sideways; Copy takes the exact text.
+  F.codeLine = (text) => F.h('div', { class: 'code-line' }, F.h('code', { class: 'mono-id', text }), F.copyBtn(text, F.t('Copy command')));
+
+  // Scrollbars are hidden everywhere (app.css). A scrollable area instead fades out on each
+  // edge that has more content past it, and the fade goes as soon as that edge is reached.
+  F.scrollEdges = (el) => {
+    if (el._edges) return;
+    el._edges = true;
+    el.classList.add('edge-fade');
+    const update = () => {
+      const maxY = el.scrollHeight - el.clientHeight;
+      const maxX = el.scrollWidth - el.clientWidth;
+      el.classList.toggle('more-up', maxY > 1 && el.scrollTop > 1);
+      el.classList.toggle('more-down', maxY > 1 && el.scrollTop < maxY - 1);
+      el.classList.toggle('more-left', maxX > 1 && el.scrollLeft > 1);
+      el.classList.toggle('more-right', maxX > 1 && el.scrollLeft < maxX - 1);
     };
-    code.addEventListener('scroll', mark, { passive: true });
-    code.addEventListener('wheel', (e) => {
-      if (Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return;
-      const max = code.scrollWidth - code.clientWidth;
-      // At either end the wheel goes back to scrolling the page.
-      if (max <= 0 || (e.deltaY < 0 && code.scrollLeft <= 0) || (e.deltaY > 0 && code.scrollLeft >= max - 1)) return;
-      e.preventDefault();
-      code.scrollLeft += e.deltaY;
-    }, { passive: false });
-    if (typeof ResizeObserver === 'function') new ResizeObserver(mark).observe(code);
-    requestAnimationFrame(mark);
-    return F.h('div', { class: 'code-line' }, code, F.copyBtn(text, 'Copy command'));
+    el.addEventListener('scroll', update, { passive: true });
+    new ResizeObserver(update).observe(el);
+    new MutationObserver(update).observe(el, { childList: true, subtree: true, characterData: true });
+    update();
   };
+  // Every area that scrolls gets its edges, including the ones views build later.
+  const EDGE_AREAS = '#scroll, .settings-nav, .chat-list, .table-scroll, .code-vs, .inspector-body, .popover';
+  const attachEdges = (root) => {
+    if (!(root instanceof Element)) return;
+    if (root.matches(EDGE_AREAS)) F.scrollEdges(root);
+    for (const el of root.querySelectorAll(EDGE_AREAS)) F.scrollEdges(el);
+  };
+  attachEdges(document.body);
+  new MutationObserver((records) => { for (const r of records) for (const n of r.addedNodes) attachEdges(n); })
+    .observe(document.body, { childList: true, subtree: true });
 
   F.emptyRequests = (sinceTs) => {
     return F.h('div', { class: 'empty' },
-      F.h('p', { class: 'empty-title', text: sinceTs ? `No requests since the server started at ${F.fmt.hm(sinceTs)}.` : 'No requests since the server started.' }),
-      F.h('p', { class: 'empty-text', text: 'Send one from Chat, or call the proxy from a terminal:' }),
+      F.h('p', { class: 'empty-title', text: sinceTs ? F.t('No requests since the server started at {time}.', { time: F.fmt.hm(sinceTs) }) : F.t('No requests since the server started.') }),
+      F.h('p', { class: 'empty-text', text: F.t('Send one from Chat, or call the proxy from a terminal:') }),
       F.codeLine(`curl ${location.origin}/v1/chat/completions -H 'Content-Type: application/json'${F.key.get() ? " -H \"Authorization: Bearer $PROXY_API_KEY\"" : ''} -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Hello"}]}'`),
-      F.h('div', { class: 'empty-actions' }, F.h('a', { class: 'btn btn-primary', href: '#/chat' }, F.icon('chat'), F.h('span', { class: 'btn-label', text: 'Send one from Chat' }))));
+      F.h('div', { class: 'empty-actions' }, F.h('a', { class: 'btn btn-primary', href: '#/chat' }, F.icon('chat'), F.h('span', { class: 'btn-label', text: F.t('Send one from Chat') }))));
   };
 
   // ---------------------------------------------------------------- inspector

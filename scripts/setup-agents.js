@@ -627,17 +627,17 @@ function tomlScalar(raw) {
 }
 
 function readTomlInfo(text) {
-  const root = {};
-  const tables = {};
+  const root = Object.create(null);
+  const tables = Object.create(null);
   let current = root;
   for (const line of String(text || '').split('\n')) {
     const table = /^\s*\[([^[\]]+)\]\s*(?:#.*)?$/.exec(line);
     if (table) {
       const name = table[1].trim();
-      current = tables[name] = tables[name] || {};
+      current = tables[name] = tables[name] || Object.create(null);
       continue;
     }
-    if (/^\s*\[\[/.test(line)) { current = {}; continue; }
+    if (/^\s*\[\[/.test(line)) { current = Object.create(null); continue; }
     const kv = /^\s*("(?:[^"\\]|\\.)*"|[A-Za-z0-9_.-]+)\s*=\s*(.*)$/.exec(line);
     if (kv) current[kv[1].replace(/^"|"$/g, '')] = tomlScalar(kv[2]);
   }
@@ -664,7 +664,7 @@ function readYamlModelBlock(text) {
   const lines = m[0].split('\n');
   const head = yamlScalar(lines[0].slice('model:'.length));
   if (head) return { default: head };
-  const out = {};
+  const out = Object.create(null);
   for (const line of lines.slice(1)) {
     const kv = /^[ \t]+([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
     if (kv) out[kv[1]] = yamlScalar(kv[2]);
@@ -1073,6 +1073,9 @@ function planTarget(target, opts, ctx, { read }) {
   outputs.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
   return {
     target,
+    // Used only when writing: a real proxy key forces mode 0600. Not part of the
+    // dashboard plan view (that view masks file text and rebuilds options).
+    apiKey: opts.apiKey,
     options: { model: opts.model, mode: opts.mode, baseUrl: opts.baseUrl, ...(opts.scope === 'project' ? { scope: 'project', projectDir: opts.projectDir } : {}) },
     files: outputs.map(({ id, after }) => {
       const spec = byId[id];
@@ -1872,14 +1875,28 @@ function makeBackupDir(ctx, now, F) {
   throw new SetupError('write_failed', `Could not create a backup folder in ${displayPath(ctx, root)}.`, { path: displayPath(ctx, root), rolled_back: true });
 }
 
-function atomicWrite(real, data, mode, F = fs) {
+// "local" is the placeholder written when no PROXY_API_KEY is set. A shorter
+// token is ignored so a file that does not contain the key keeps its mode.
+function proxyKeyLocksFile(data, proxyKey) {
+  if (typeof proxyKey !== 'string' || proxyKey === 'local' || proxyKey.length < 8) return false;
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+  if (buf.includes(proxyKey)) return true;
+  const escaped = JSON.stringify(proxyKey).slice(1, -1);
+  return escaped !== proxyKey && buf.includes(escaped);
+}
+
+function atomicWrite(real, data, mode, F = fs, proxyKey) {
+  // New files are already 0600. An existing file keeps its mode unless these
+  // bytes contain a real proxy key — then the replacement is owner-only, even
+  // when the previous file was looser (often 0644).
+  const writeMode = proxyKeyLocksFile(data, proxyKey) ? 0o600 : mode;
   const dir = path.dirname(real);
   F.mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, `.${path.basename(real)}.fdsa-${rand36(6)}.tmp`);
   let fd = null;
   try {
-    fd = F.openSync(tmp, 'wx', mode);
-    F.fchmodSync(fd, mode);
+    fd = F.openSync(tmp, 'wx', writeMode);
+    F.fchmodSync(fd, writeMode);
     F.writeFileSync(fd, data);
     F.fsyncSync(fd);
     F.closeSync(fd);
@@ -1941,7 +1958,7 @@ function writeBackup(ctx, items, { source, now, agents, options }, F) {
 
 function rollbackWrites(done, dir, F) {
   for (const s of [...done].reverse()) {
-    if (s.existed) atomicWrite(s.real, F.readFileSync(path.join(dir, s.backupName)), s.mode, F);
+    if (s.existed) atomicWrite(s.real, F.readFileSync(path.join(dir, s.backupName)), s.mode, F, s.apiKey);
     else { try { F.unlinkSync(s.real); } catch (e) { if (e.code !== 'ENOENT') throw e; } }
   }
 }
@@ -1954,7 +1971,7 @@ function applyPlans(plans, ctx, { source, now = Date.now(), fs: F = fs, onBackup
     for (const f of plan.files) {
       if (f.virtual || f.action === 'unchanged') continue;
       const { real } = resolveRealPath(ctx, f.path, F);
-      items.push({ agent_id: plan.target, file_id: f.id, path: f.path, format: f.format, real, next: Buffer.from(f.after, 'utf8'), after: f.after });
+      items.push({ agent_id: plan.target, file_id: f.id, path: f.path, format: f.format, real, next: Buffer.from(f.after, 'utf8'), after: f.after, apiKey: plan.apiKey });
     }
   }
   if (!items.length) return { written: [], backup: null };
@@ -1967,7 +1984,7 @@ function applyPlans(plans, ctx, { source, now = Date.now(), fs: F = fs, onBackup
   const done = [];
   for (const s of backup.states) {
     try {
-      atomicWrite(s.real, s.next, s.existed ? s.mode : 0o600, F);
+      atomicWrite(s.real, s.next, s.existed ? s.mode : 0o600, F, s.apiKey);
       done.push(s);
     } catch (e) {
       let rolledBack = true;
@@ -2151,8 +2168,9 @@ async function interactive(opts) {
         }),
         setLang,
         selected,
-        { cancelId: 'cancel' },
+        { cancelId: 'cancel', skipId: 'skip' },
       );
+      if (chosen.id === 'skip') return null;
       if (chosen.id === 'cancel') {
         await pick(
           () => ({
@@ -2299,8 +2317,8 @@ function restoreCli(ctx, dirArg) {
   for (const [name, dest] of Object.entries(map)) {
     const src = path.join(dir, name);
     if (!fs.existsSync(src)) continue;
-    ensureDir(path.dirname(dest));
-    fs.copyFileSync(src, dest);
+    const { real } = resolveRealPath(ctx, dest);
+    atomicWrite(real, fs.readFileSync(src), 0o600);
     console.log(`restored ${dest}`);
   }
   for (const name of fs.readdirSync(dir)) {

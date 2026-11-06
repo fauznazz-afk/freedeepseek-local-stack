@@ -291,6 +291,34 @@ test('applyPlan writes atomically, keeps modes, backs up changed files and lists
   assert.ok(!fs.readdirSync(path.join(home, '.config/opencode')).some(n => n.endsWith('.tmp')));
 });
 
+test('applyPlan sets mode 0600 when a 0644 file with no key receives a real proxy key', () => {
+  const home = tmpdir();
+  const key = 'fds-proxy-key-99';
+  put(home, '.claude/settings.json', '{"theme":"dark"}\n', 0o644);
+  put(home, '.config/opencode/opencode.json', '{"model":"openai/gpt"}\n', 0o644);
+  put(home, '.config/opencode/AGENTS.md', '# mine\n', 0o644);
+  A.applyPlans([
+    plan('claude-code', { mode: 'replace', apiKey: key }, home),
+    plan('opencode', { mode: 'add', apiKey: key }, home),
+  ], applyCtx(home), { source: 'dashboard', now: Date.now() });
+  const settings = path.join(home, '.claude/settings.json');
+  assert.ok(read(home, '.claude/settings.json').includes(key));
+  assert.equal((fs.statSync(settings).mode & 0o777), 0o600);
+  const config = path.join(home, '.config/opencode/opencode.json');
+  assert.ok(read(home, '.config/opencode/opencode.json').includes(key));
+  assert.equal((fs.statSync(config).mode & 0o777), 0o600);
+  const agents = path.join(home, '.config/opencode/AGENTS.md');
+  assert.equal(read(home, '.config/opencode/AGENTS.md').includes(key), false);
+  assert.equal((fs.statSync(agents).mode & 0o777), 0o644);
+
+  // Shorter than 8 characters: not treated as a real proxy key, so the old mode stays.
+  const loose = tmpdir();
+  put(loose, '.claude/settings.json', '{"theme":"dark"}\n', 0o644);
+  doApply('claude-code', { mode: 'replace', apiKey: '1234567' }, loose);
+  assert.ok(read(loose, '.claude/settings.json').includes('1234567'));
+  assert.equal((fs.statSync(path.join(loose, '.claude/settings.json')).mode & 0o777), 0o644);
+});
+
 test('applyPlan writes through a symlink inside HOME and refuses one that leaves HOME', () => {
   const home = tmpdir();
   put(home, 'dotfiles/opencode.json', '{}\n');
@@ -468,6 +496,15 @@ test('inspectTarget derives each setup state from the files on disk', () => {
 function runCli(args, env) {
   return spawnSync(process.execPath, ['scripts/setup-agents.js', ...args], { cwd: ROOT, encoding: 'utf8', env: { ...process.env, ...env } });
 }
+
+test('the wizard can be skipped: it exits cleanly and writes nothing', () => {
+  const home = tmpdir();
+  const res = spawnSync(process.execPath, ['scripts/setup-agents.js'], { cwd: ROOT, encoding: 'utf8', input: '\n', env: { ...process.env, SETUP_HOME: home } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /Enter: /);
+  assert.doesNotMatch(res.stdout, /model=/);
+  assert.deepEqual(fs.readdirSync(home), []);
+});
 
 test('the CLI writes a manifest, and --restore with a manifest deletes files setup created', () => {
   const home = tmpdir();
@@ -1127,4 +1164,14 @@ test('audit tooling-5: mergeClaudeSettings rejects an env that is not an object'
       `env ${JSON.stringify(env)} must be rejected`,
     );
   }
+});
+
+test('inspectTarget does not pollute Object.prototype from [__proto__] in TOML or YAML', () => {
+  const home = tmpdir();
+  put(home, '.codex/config.toml', '[__proto__]\npolluted_toml = "yes"\n');
+  put(home, '.hermes/config.yaml', 'model:\n  __proto__: polluted\n  polluted_yaml: yes\n');
+  inspect('codex', home);
+  inspect('hermes', home);
+  assert.equal(({}).polluted_toml, undefined);
+  assert.equal(({}).polluted_yaml, undefined);
 });

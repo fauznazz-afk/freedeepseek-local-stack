@@ -7,7 +7,8 @@
  * 
  * Per-agent sessions: each unique `user` field gets its own DeepSeek web session.
  * Auto-reset: sessions reset when message chain reaches 100 messages or age > 2 hours.
- * Listens on 127.0.0.1:9655 by default (HOST is configurable)
+ * Listens on 127.0.0.1:9655 by default (HOST is configurable).
+ * HTTP unless both TLS_CERT_FILE and TLS_KEY_FILE are set and readable.
  */
 
 const http = require('http');
@@ -113,40 +114,6 @@ function requireProxyApiKey(key, required) {
 
 const PROXY_API_KEY = loadProxyApiKey();
 const PROXY_ADMIN_ALLOW_REMOTE = isTruthy(process.env.PROXY_ADMIN_ALLOW_REMOTE);
-// Headers that only a proxy in front of us may set. A keyless proxy trusts the
-// loopback address, so accepting these from a local web page would let it forge
-// its own origin and reach the admin API.
-const FORWARDING_HEADERS = ['x-forwarded-for', 'forwarded', 'x-real-ip'];
-function hasForwardingHeader(req) {
-    return FORWARDING_HEADERS.some(name => req.headers[name] !== undefined);
-}
-// Without a key, loopback is the only credential. On Windows and macOS the OS
-// cannot tell which local user opened the socket, so a same-machine web page is
-// indistinguishable from the owner. The Host header is the cheap tell: a page
-// served from evil.example still sends its own Host, not 127.0.0.1.
-function isLoopbackHostHeader(hostHeader) {
-    const value = String(hostHeader || '').trim().toLowerCase();
-    if (!value) return true;
-    const withoutPort = value.startsWith('[')
-        ? value.slice(0, value.indexOf(']') + 1)
-        : value.split(':')[0];
-    return isLoopbackHost(withoutPort) || withoutPort === '0.0.0.0';
-}
-function localCallerDecision(req, { proxyKey = PROXY_API_KEY, platform = process.platform } = {}) {
-    if (proxyKey) return { allowed: true };
-    const remoteAddress = req && req.socket ? req.socket.remoteAddress : undefined;
-    const forbidden = (message) => ({ allowed: false, status: 403, error: { message, type: 'local_caller_forbidden' } });
-    if (!isLoopbackHost(remoteAddress)) {
-        return forbidden('This proxy has no PROXY_API_KEY and only accepts loopback clients. Set PROXY_API_KEY to accept other clients.');
-    }
-    if (hasForwardingHeader(req)) {
-        return forbidden('This proxy has no PROXY_API_KEY and rejects forwarded-for headers from a local caller. Set PROXY_API_KEY to run it behind another proxy.');
-    }
-    if (platform !== 'linux' && !isLoopbackHostHeader(req && req.headers ? req.headers.host : '')) {
-        return forbidden('This proxy has no PROXY_API_KEY and only accepts the local user that started it. Set PROXY_API_KEY to share it.');
-    }
-    return { allowed: true };
-}
 const PROXY_CORS_ORIGINS = new Set(String(process.env.PROXY_CORS_ORIGINS || '')
     .split(',')
     .map(value => normalizeOrigin(value))
@@ -191,6 +158,34 @@ function isLoopbackHost(host) {
         || normalized === '::1'
         || normalized === '::ffff:127.0.0.1'
         || normalized === 'localhost';
+}
+
+// Optional TLS. Unset keeps today's HTTP server, including on loopback.
+// One file without the other, or a file that cannot be read, fails closed:
+// falling back to HTTP would send the login import and Authorization header in clear text.
+function readTlsCredentials(env = process.env) {
+    const certFile = typeof env.TLS_CERT_FILE === 'string' ? env.TLS_CERT_FILE.trim() : '';
+    const keyFile = typeof env.TLS_KEY_FILE === 'string' ? env.TLS_KEY_FILE.trim() : '';
+    if (!certFile && !keyFile) return null;
+    if (!certFile || !keyFile) {
+        throw new Error('TLS_CERT_FILE and TLS_KEY_FILE must both be set to serve HTTPS. Leave both unset to keep HTTP.');
+    }
+    const readPem = (name, file) => {
+        try {
+            fs.accessSync(file, fs.constants.R_OK);
+            const pem = fs.readFileSync(file);
+            if (!pem.length) throw Object.assign(new Error('file is empty'), { code: 'EINVAL' });
+            return pem;
+        } catch (error) {
+            throw new Error(`Could not read ${name} (${file}): ${error.message}`);
+        }
+    };
+    return { cert: readPem('TLS_CERT_FILE', certFile), key: readPem('TLS_KEY_FILE', keyFile) };
+}
+
+function cleartextStartupWarning(host, tlsEnabled) {
+    if (tlsEnabled || isLoopbackHost(host)) return null;
+    return `[DS-API] WARNING: HOST=${host} is not loopback and TLS is off. The login import and the Authorization header are clear text. Set TLS_CERT_FILE and TLS_KEY_FILE, or bind to 127.0.0.1.`;
 }
 
 function normalizeOrigin(origin) {
@@ -490,6 +485,9 @@ const MAX_UPSTREAM_PROMPT_CHARS = Number.isFinite(configuredPromptChars)
 // 65% of it away on every rebuild - the agent paid storage for text that could
 // never reach the model.
 const MAX_HISTORY_CHARS_BUDGET = Math.max(1000, Math.floor(MAX_UPSTREAM_PROMPT_CHARS * HISTORY_BUDGET_SHARE));
+function sanitizeHeaderValue(value) {
+    return String(value || '').replace(/[\r\n\0]+/g, '').trim();
+}
 function buildBaseHeaders(config = DS_CONFIG) {
     return {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
@@ -498,12 +496,12 @@ function buildBaseHeaders(config = DS_CONFIG) {
         "x-client-locale": "ru",
         "x-client-timezone-offset": "14400",
         "x-app-version": "2.0.2",
-        "Authorization": `Bearer ${config.token || ''}`,
-        "x-hif-dliq": config.hif_dliq || '',
-        "x-hif-leim": config.hif_leim || '',
+        "Authorization": `Bearer ${sanitizeHeaderValue(config.token)}`,
+        "x-hif-dliq": sanitizeHeaderValue(config.hif_dliq),
+        "x-hif-leim": sanitizeHeaderValue(config.hif_leim),
         "Origin": "https://chat.deepseek.com",
         "Referer": "https://chat.deepseek.com/",
-        "Cookie": config.cookie || '',
+        "Cookie": sanitizeHeaderValue(config.cookie),
         "Content-Type": "application/json",
     };
 }
@@ -561,6 +559,9 @@ function readAccountFiles(paths) {
             if (!config || typeof config !== 'object' || Array.isArray(config)) {
                 throw new Error('expected a JSON object');
             }
+            // scripts/auth_import.js isDeepseekWasmUrl. Anything else keeps the
+            // built-in module instead of being fetched and run.
+            config.wasmUrl = pow.wasmUrlOrDefault(config.wasmUrl);
             loaded.push({ file, config });
         } catch (e) {
             errors.push({ file, message: describeAuthFileError(e) });
@@ -841,6 +842,93 @@ function clientIp(req) {
     }
     return raw || 'unknown';
 }
+// Abuse limits for callers outside this machine. Loopback is never limited, so local agents keep
+// working. Only the socket address, or the hop a trusted proxy appended, decides who that is: the
+// left end of X-Forwarded-For is whatever the client sent.
+function socketIp(socket) {
+    const raw = String((socket && socket.remoteAddress) || '').replace(/^::ffff:/, '');
+    return raw === '::1' ? '127.0.0.1' : raw;
+}
+function guardIp(req) {
+    if (isTruthy(process.env.TRUST_PROXY)) {
+        const hops = String(req.headers['x-forwarded-for'] || '').split(',').map(hop => hop.trim()).filter(Boolean);
+        if (hops.length) return hops[hops.length - 1].replace(/^::ffff:/, '');
+    }
+    return socketIp(req.socket);
+}
+function createRemoteGuard({ perMinute = 600, authFailLimit = 10, authLockMs = 15 * 60 * 1000, perIpConnections = 64, maxTracked = 10000, now = Date.now } = {}) {
+    const clients = new Map();
+    const idle = (client, t) => client.sockets === 0 && client.lockedUntil <= t && t - client.windowStart >= 60000 && t - client.failStart >= authLockMs;
+    const prune = (t) => {
+        for (const [ip, client] of clients) if (idle(client, t)) clients.delete(ip);
+        // Still full under a flood of addresses: drop the oldest that holds no socket.
+        for (const [ip, client] of clients) {
+            if (clients.size < maxTracked) break;
+            if (client.sockets === 0) clients.delete(ip);
+        }
+    };
+    const clientFor = (ip) => {
+        let client = clients.get(ip);
+        if (client) return client;
+        const t = now();
+        if (clients.size >= maxTracked) prune(t);
+        client = { windowStart: t, count: 0, failStart: t, failures: 0, lockedUntil: 0, sockets: 0 };
+        clients.set(ip, client);
+        return client;
+    };
+    const seconds = (ms) => Math.max(1, Math.ceil(ms / 1000));
+    return {
+        // One request. Refused while the address is locked out or over its minute budget.
+        check(ip) {
+            const client = clientFor(ip);
+            const t = now();
+            if (client.lockedUntil > t) return { allowed: false, retryAfter: seconds(client.lockedUntil - t) };
+            if (!perMinute) return { allowed: true };
+            if (t - client.windowStart >= 60000) { client.windowStart = t; client.count = 0; }
+            client.count++;
+            if (client.count > perMinute) return { allowed: false, retryAfter: seconds(client.windowStart + 60000 - t) };
+            return { allowed: true };
+        },
+        // A wrong key. Enough of them inside the lock window close the door for that window.
+        failedAuth(ip) {
+            if (!authFailLimit) return;
+            const client = clientFor(ip);
+            const t = now();
+            if (t - client.failStart >= authLockMs) { client.failStart = t; client.failures = 0; }
+            client.failures++;
+            if (client.failures >= authFailLimit) { client.lockedUntil = t + authLockMs; client.failures = 0; }
+        },
+        // One TCP connection, before any HTTP is read.
+        connect(ip) {
+            const client = clientFor(ip);
+            if (client.lockedUntil > now()) return false;
+            if (perIpConnections && client.sockets >= perIpConnections) return false;
+            client.sockets++;
+            return true;
+        },
+        disconnect(ip) {
+            const client = clients.get(ip);
+            if (client && client.sockets > 0) client.sockets--;
+        },
+        size: () => clients.size,
+    };
+}
+const remoteGuard = createRemoteGuard({
+    perMinute: envNumber('PROXY_RATE_LIMIT_PER_MIN', 600),
+    authFailLimit: envNumber('PROXY_AUTH_FAIL_LIMIT', 10),
+    authLockMs: envNumber('PROXY_AUTH_LOCK_MS', 15 * 60 * 1000),
+    perIpConnections: envNumber('PROXY_MAX_CONNECTIONS_PER_IP', 64),
+});
+// Runs on every TCP connection, so a refused caller costs a close and no parsing. Without a proxy
+// key nothing outside this machine is served, so it does not get an answer either.
+function guardConnection(socket, { guard = remoteGuard, proxyKey = PROXY_API_KEY, trustProxy = isTruthy(process.env.TRUST_PROXY) } = {}) {
+    const ip = socketIp(socket);
+    if (isLoopbackHost(ip)) return;
+    if (!proxyKey) { socket.destroy(); return; }
+    if (trustProxy) return; // Every socket is the proxy's; the per-request limits see the real client.
+    if (!guard.connect(ip)) { socket.destroy(); return; }
+    socket.once('close', () => guard.disconnect(ip));
+}
 // Flat estimate for every model (DeepSeek API list prices); the web path has no billing.
 const USD_PER_M_INPUT = 0.22;
 const USD_PER_M_OUTPUT = 0.66;
@@ -887,14 +975,15 @@ function scrubLogText(text) {
     if (text === null || text === undefined || text === '') return null;
     let out = String(text);
     const secrets = new Set();
-    for (const account of accounts) {
-        const config = account.config || {};
+    if (typeof PROXY_API_KEY === 'string' && PROXY_API_KEY.length >= 6) secrets.add(PROXY_API_KEY);
+    for (const account of [...accounts, { config: DS_CONFIG }]) {
+        const config = account?.config || {};
         for (const value of [config.token, config.hif_dliq, config.hif_leim]) {
             if (typeof value === 'string' && value.length >= 6) secrets.add(value);
         }
         for (const pair of String(config.cookie || '').split(';')) {
-            const value = pair.slice(pair.indexOf('=') + 1).trim();
-            if (pair.includes('=') && value.length >= 6) secrets.add(value);
+            const value = (pair.includes('=') ? pair.slice(pair.indexOf('=') + 1) : pair).trim();
+            if (value.length >= 6) secrets.add(value);
         }
     }
     for (const secret of [...secrets].sort((a, b) => b.length - a.length)) out = out.split(secret).join('[redacted]');
@@ -1172,7 +1261,8 @@ function resetRemoteSession(session) {
 
 // POST /reset-session: the next request opens a new DeepSeek chat. Local history is
 // kept as a recovery hint unless the client drops it (it will send its own transcript,
-// e.g. after editing a message, and the replaced turns must not come back).
+// e.g. after editing a message, and the replaced turns must not come back). The
+// response counts that history and does not return the stored prompt text.
 function resetAgentSession(agentId, { dropHistory = false } = {}) {
     const session = sessions.get(agentId);
     if (!session) return null;
@@ -1184,9 +1274,8 @@ function resetAgentSession(agentId, { dropHistory = false } = {}) {
         session.openingRequest = null;
     }
     const historyCount = session.history.length;
-    const historyPreview = session.history.map(e => String(e.user || '').substring(0, 40)).join(' | ');
     resetRemoteSession(session);
-    return { status: 'session_reset', agent: agentId, history_preserved: historyCount, history: historyPreview };
+    return { status: 'session_reset', agent: agentId, history_preserved: historyCount };
 }
 
 function prepareSessionForPrompt(session, now = Date.now()) {
@@ -1226,6 +1315,7 @@ function getOrCreateAgentSession(agentId) {
     }
     const session = sessions.get(agentId);
     session.lastActivityAt = Date.now();
+    evictLeastRecentlyUsedSessions(agentId);
     return session;
 }
 
@@ -1245,8 +1335,8 @@ function sweepIdleSessions(maxIdleMs = SESSION_IDLE_EVICT_MS) {
     return removed;
 }
 
-// solvePOW() lives in lib/pow (compiled-module cache + WASM-fetch timeout),
-// shared with client.js. Called as solvePOW(challenge, wasmUrl).
+// solvePOW() lives in lib/pow (compiled-module cache + WASM-fetch timeout).
+// Called as solvePOW(challenge, wasmUrl).
 
 // DeepSeek Web as of 2026-09-20: Instant/Expert/Pro UI gone. One weight: V4.1-Flash.
 // Official paid ID: deepseek-flash. Web model_type is always `default`.
@@ -1327,25 +1417,27 @@ const {
 function createUpstreamHttpError(status, body = '', retryAfter = null) {
     const verdict = classifyUpstreamFailure({ status, body });
     const detail = verdict.detail;
+    const retryMs = parseRetryAfterMs(retryAfter);
+    const safeRetryAfter = retryMs != null ? String(Math.max(1, Math.ceil(retryMs / 1000))) : null;
     if (verdict.kind === 'rate_limit') {
         const error = new Error(`DeepSeek rate limit (upstream HTTP ${Number(status) || 429})${detail ? `: ${detail}` : ''}`);
         error.status = 429;
         error.type = 'rate_limit_error';
-        if (retryAfter) error.retryAfter = retryAfter;
+        if (safeRetryAfter) error.retryAfter = safeRetryAfter;
         return error;
     }
     if (verdict.kind === 'overflow') {
         const error = new Error(detail || 'DeepSeek prompt is too long');
         error.status = 400;
         error.type = 'context_length_exceeded';
-        if (retryAfter) error.retryAfter = retryAfter;
+        if (safeRetryAfter) error.retryAfter = safeRetryAfter;
         return error;
     }
     const code = verdict.status;
     const error = new Error(`DeepSeek upstream HTTP ${code}${detail ? `: ${detail}` : ''}`);
     error.status = code;
     error.type = verdict.type;
-    if (retryAfter) error.retryAfter = retryAfter;
+    if (safeRetryAfter) error.retryAfter = safeRetryAfter;
     return error;
 }
 
@@ -1392,7 +1484,9 @@ function canonicalizeModelId(model) {
 }
 function resolveModelConfig(model) {
     const requested = canonicalizeModelId(model);
-    return MODEL_CONFIGS[requested] || MODEL_CONFIGS[DEFAULT_MODEL_ID];
+    return Object.prototype.hasOwnProperty.call(MODEL_CONFIGS, requested)
+        ? MODEL_CONFIGS[requested]
+        : MODEL_CONFIGS[DEFAULT_MODEL_ID];
 }
 // `web_search` (boolean) in the request body overrides the model's search default.
 function resolveRequestWebFlags(model, rawParams) {
@@ -1446,35 +1540,8 @@ function imageExtension(mediaType) {
     }[mediaType] || '';
 }
 
-function isPrivateNetworkAddress(address) {
-    const value = String(address || '').toLowerCase().split('%', 1)[0];
-    if (net.isIPv4(value)) {
-        const parts = value.split('.').map(Number);
-        const [a, b, c] = parts;
-        return a === 0 || a === 10 || a === 127
-            || (a === 100 && b >= 64 && b <= 127)
-            || (a === 169 && b === 254)
-            || (a === 172 && b >= 16 && b <= 31)
-            || (a === 192 && b === 0 && (c === 0 || c === 2))
-            || (a === 192 && b === 168)
-            || (a === 198 && (b === 18 || b === 19 || b === 51))
-            || (a === 203 && b === 0 && c === 113)
-            || a >= 224;
-    }
-    if (net.isIPv6(value)) {
-        if (value === '::' || value === '::1') return true;
-        if (value.startsWith('fc') || value.startsWith('fd')) return true;
-        if (/^fe[89ab]/.test(value)) return true;
-        // Every textual form of ::ffff:0:0/96, not only ::ffff:a.b.c.d.
-        // dns.lookup returns hex (::ffff:7f00:1) and keeps uncompressed
-        // literals (0:0:0:0:0:ffff:127.0.0.1); both open TCP to the IPv4.
-        const mapped = ipv4FromMappedIpv6(value);
-        if (mapped) return isPrivateNetworkAddress(mapped);
-        return false;
-    }
-    return true;
-}
-
+// Parse an IPv6 literal into its eight 16-bit groups (including embedded IPv4
+// tails like ::ffff:a.b.c.d or 0:0:0:0:0:ffff:127.0.0.1), or null if invalid.
 function parseIpv6Groups(address) {
     let text = String(address || '').toLowerCase();
     const colon = text.lastIndexOf(':');
@@ -1498,17 +1565,23 @@ function parseIpv6Groups(address) {
     };
     const head = parseHalf(halves[0]);
     if (head === null) return null;
-    if (halves.length === 1) return head.length === 8 ? head : null;
-    const tailGroups = parseHalf(halves[1]);
-    if (tailGroups === null) return null;
-    const missing = 8 - head.length - tailGroups.length;
-    if (missing < 0) return null;
-    return [...head, ...new Array(missing).fill(0), ...tailGroups];
+    let groups = head;
+    if (halves.length === 2) {
+        const rest = parseHalf(halves[1]);
+        if (rest === null) return null;
+        const missing = 8 - head.length - rest.length;
+        if (missing < 1) return null;
+        groups = head.concat(Array(missing).fill(0), rest);
+    }
+    return groups.length === 8 ? groups : null;
 }
 
+// Every textual form of an IPv4-mapped address (::ffff:0:0/96), not only
+// ::ffff:a.b.c.d. dns.lookup returns hex (::ffff:7f00:1) and uncompressed
+// (0:0:0:0:0:ffff:127.0.0.1) literals unchanged, and both open TCP to the embedded IPv4.
 function ipv4FromMappedIpv6(address) {
     const groups = parseIpv6Groups(address);
-    if (!groups || groups.length !== 8) return '';
+    if (!groups) return '';
     const mapped = groups[0] === 0 && groups[1] === 0 && groups[2] === 0
         && groups[3] === 0 && groups[4] === 0 && groups[5] === 0xffff;
     if (!mapped) return '';
@@ -1517,12 +1590,51 @@ function ipv4FromMappedIpv6(address) {
     return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
 }
 
+function isPrivateNetworkAddress(address) {
+    const value = String(address || '').toLowerCase().split('%', 1)[0];
+    if (net.isIPv4(value)) {
+        const parts = value.split('.').map(Number);
+        const [a, b, c] = parts;
+        return a === 0 || a === 10 || a === 127
+            || (a === 100 && b >= 64 && b <= 127)
+            || (a === 169 && b === 254)
+            || (a === 172 && b >= 16 && b <= 31)
+            || (a === 192 && b === 0 && (c === 0 || c === 2))
+            || (a === 192 && b === 168)
+            || (a === 198 && (b === 18 || b === 19 || b === 51))
+            || (a === 203 && b === 0 && c === 113)
+            || a >= 224;
+    }
+    if (net.isIPv6(value)) {
+        const groups = parseIpv6Groups(value);
+        if (!groups) return true;
+        const allZeroPrefix = groups[0] === 0 && groups[1] === 0 && groups[2] === 0
+            && groups[3] === 0 && groups[4] === 0 && groups[5] === 0 && groups[6] === 0;
+        if (allZeroPrefix && (groups[7] === 0 || groups[7] === 1)) return true;
+        if ((groups[0] & 0xfe00) === 0xfc00) return true;
+        if ((groups[0] & 0xffc0) === 0xfe80) return true;
+        if ((groups[0] & 0xff00) === 0xff00) return true;
+        const mapped = ipv4FromMappedIpv6(value);
+        return mapped ? isPrivateNetworkAddress(mapped) : false;
+    }
+    return true;
+}
+
+// Node 22 keeps one pair of brackets on an IPv6 URL hostname. dns.lookup rejects them.
+function imageLookupHostname(hostname) {
+    const value = String(hostname || '').toLowerCase();
+    const bracketed = value.match(/^\[([^\[\]]+)\]$/);
+    if (bracketed && net.isIPv6(bracketed[1])) return bracketed[1];
+    return value;
+}
+
 async function assertPublicImageUrl(url) {
     if (url.protocol !== 'https:') {
         throw clientInputError('Image URL must be a public HTTPS URL');
     }
-    const hostname = url.hostname.toLowerCase();
-    if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) {
+    const hostname = imageLookupHostname(url.hostname);
+    const bareHost = hostname.replace(/\.+$/, '');
+    if (!bareHost || bareHost === 'localhost' || bareHost.endsWith('.localhost') || bareHost.endsWith('.local')) {
         throw clientInputError('Image URL must be a public HTTPS URL');
     }
     let addresses;
@@ -1600,7 +1712,8 @@ async function fetchPublicImage(sourceUrl, index) {
             if (!location || redirect === MAX_IMAGE_REDIRECTS) {
                 throw clientInputError('Image URL has too many redirects');
             }
-            current = new URL(location, current);
+            try { current = new URL(location, current); }
+            catch (error) { throw clientInputError('Image URL is invalid'); }
             continue;
         }
         if (response.status < 200 || response.status >= 300) {
@@ -2591,7 +2704,7 @@ function parseJsonToolCandidate(raw, label = 'json', options = {}) {
             return tc;
         }
     } catch (e) {
-        console.log(`[parseToolCall] ${label} JSON.parse failed: ${e.message.substring(0, 100)}`);
+        console.log(`[parseToolCall] ${label} JSON.parse failed: ${scrubUpstreamText(e.message).substring(0, 100)}`);
     }
     return null;
 }
@@ -2642,10 +2755,11 @@ function decodeDsmlValue(value) {
         .replace(/&amp;/gi, '&');
 }
 
-function decodeDsmlParameterValue(value) {
+function decodeDsmlParameterValue(value, keepEntities = false) {
     const raw = String(value || '');
     const cdata = raw.trim().match(/^<!\[CDATA\[([\s\S]*?)\]\]>$/i);
-    return cdata ? cdata[1] : decodeDsmlValue(raw);
+    if (cdata) return cdata[1];
+    return keepEntities ? raw : decodeDsmlValue(raw);
 }
 
 function getMarkupAttribute(attrs, attribute) {
@@ -2727,12 +2841,12 @@ function scanDsmlStructuralTags(text) {
     return tags;
 }
 
-function parseDsmlParameter(attrs, rawBody, args, seenNames) {
+function parseDsmlParameter(attrs, rawBody, args, seenNames, keepEntities = false) {
     const parameterName = getMarkupAttribute(attrs, 'name');
     if (!parameterName || !/^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$/.test(parameterName) || seenNames.has(parameterName)) return false;
     seenNames.add(parameterName);
     const stringMode = getMarkupAttribute(attrs, 'string');
-    const rawValue = decodeDsmlParameterValue(rawBody);
+    const rawValue = decodeDsmlParameterValue(rawBody, keepEntities);
     if (rawValue.length > MAX_TOOL_ARGUMENT_CHARS) return false;
     let value = rawValue;
     if (stringMode && stringMode.toLowerCase() === 'false') {
@@ -2748,7 +2862,7 @@ function parseDsmlInvoke(name, body) {
     const parameterTags = structuralTags.filter(tag => tag.name === 'parameter');
     if (structuralTags.some(tag => tag.name !== 'parameter')) return null;
 
-    const args = {};
+    const args = Object.create(null);
     let parameterCount = 0;
     const seenNames = new Set();
     let cursor = 0;
@@ -2798,6 +2912,7 @@ function extractToolCallScope(normalized) {
     }
     // Narrow repair: tolerate a missing opening wrapper only when a closing
     // wrapper exists. A bare invoke without this sentinel is never executable.
+    // The one sentinel-free form is parseBareCallBlocks: a reply made only of <call> blocks.
     if (closings.length > 0) {
         const closing = closings[closings.length - 1];
         const invokeOpenings = tags.filter(tag => tag.name === 'invoke' && !tag.closing && tag.start < closing.start);
@@ -2938,8 +3053,8 @@ function collectJsonToolCalls(text) {
     }
 
     // Web DeepSeek sometimes wraps a bare {"name","arguments"} call in <｜tool_call>...</tool_call>
-    // (fullwidth bar). Take the next balanced JSON object so a literal "</tool_call>"
-    // inside an argument string, or an earlier unclosed tag, cannot break it.
+    // (fullwidth bar). Scan for each opening tag and take the next balanced JSON object so a
+    // literal "</tool_call>" inside an argument string or an earlier unclosed tag cannot break it.
     const xmlRe = /<\s*[|｜]*\s*tool_call\s*[|｜]*\s*>/gi;
     let xml;
     while ((xml = xmlRe.exec(value)) !== null) {
@@ -2948,7 +3063,8 @@ function collectJsonToolCalls(text) {
         const rawJson = extractBalancedJsonAt(value, braceIdx);
         if (!rawJson) continue;
         try {
-            rememberToolCall(calls, seen, coerceToolCallObject(JSON.parse(rawJson), { allowBare: true }));
+            const parsed = JSON.parse(rawJson);
+            rememberToolCall(calls, seen, coerceToolCallObject(parsed, { allowBare: true }));
         } catch (e) { /* malformed block is left to markup repair */ }
     }
 
@@ -2974,21 +3090,23 @@ function collectJsonToolCalls(text) {
     return calls;
 }
 
-// DeepSeek Web garbles the delimiters themselves.
-// Restore the canonical DSML prefix so detection and parsing see one form.
+// DeepSeek Web garbles the delimiters themselves: <｜ဉDSML｜ဉ calls>, <｜토큰｜|DSML｜| invoke>.
+// Restore the canonical <｜｜DSML｜｜ tool_calls> prefix so detection and parsing see one form.
 function normalizeGarbledDsmlDelimiters(text) {
     return text.replace(/([<＜]\s*\/?\s*)[|｜][^\s<>/A-Za-z]{0,4}DSML[^\s<>/A-Za-z]{0,4}\s*(calls\b)?/gi,
-        (whole, open, calls) => open.replace('＜', '<') + '｜｜DSML｜｜ ' + (calls ? 'tool_calls' : ''));
+        (whole, open, calls) => `${open.replace('＜', '<')}｜｜DSML｜｜ ${calls ? 'tool_calls' : ''}`);
 }
 
-// Rebuild closers from a tag stack. Only used after the strict parse found nothing.
+// Rebuild closers from a tag stack: repeated </parameter>, nameless </｜｜DSML｜｜>, a bare <invoke> or a
+// second <tool_calls> used as a closer, and an invoke left open before the next one.
+// Only used after the strict parse found nothing; the result still goes through the strict parser.
 function repairGarbledDsmlStructure(text) {
     const stack = [];
     const closeTo = (name) => {
         let out = '';
         while (stack.length) {
             const top = stack.pop();
-            out += '</｜｜DSML｜｜ ' + top + '>';
+            out += `</｜｜DSML｜｜ ${top}>`;
             if (top === name) break;
         }
         return out;
@@ -3009,7 +3127,9 @@ function repairGarbledDsmlStructure(text) {
     });
 }
 
-// Recover only when every name/arguments pair parses cleanly.
+// DeepSeek Web sometimes garbles DSML into
+// <invoke name="tool_calls"><parameter name="name">read</parameter><parameter name="arguments">{...}</parameter>
+// or puts name="name" on the invoke itself. Recover only when every name/arguments pair parses cleanly.
 function salvageGarbledDsmlCalls(text) {
     const value = String(text || '').replace(/｜/g, '|').replace(/<\s*(\/?)\s*\|+\s*DSML\s*\|+\s*/gi, '<$1');
     const argCount = (value.match(/<parameter\s+name\s*=\s*"arguments"/gi) || []).length;
@@ -3018,11 +3138,86 @@ function salvageGarbledDsmlCalls(text) {
     let m;
     while ((m = pairRe.exec(value)) !== null) {
         let call = null;
-        try { call = buildToolCall(m[1], JSON.parse(decodeDsmlParameterValue(m[2]).trim())); } catch (e) { return []; }
+        try { call = buildToolCall(m[1], JSON.parse(decodeDsmlParameterValue(m[2]).trim())); } catch { return []; }
         if (!call) return [];
         calls.push(call);
     }
     return calls.length === argCount ? calls : [];
+}
+
+// DeepSeek Web sometimes replies with only <call name="bash"><parameter name="command">...</parameter></call>.
+// Accepted trade-off: a reply made only of such blocks runs, even if the model was quoting one verbatim;
+// the client whitelist still applies, and a <call> quoted in prose never runs.
+// Values arrive unescaped, so they are read by position and kept literal: a </call>, <invoke or &lt;
+// inside a value is data. A </parameter> closes a value only when <parameter or </call> follows it.
+const BARE_CALL_OPEN_RE = /\s*[<＜]call\s([^<>＜＞]{0,1024})[>＞]/y;
+const BARE_CALL_CLOSE_RE = /\s*[<＜]\/call\s*[>＞]/y;
+const BARE_CALL_END_RE = /[<＜]\/call\s*[>＞]/g;
+const BARE_PARAM_OPEN_RE = /\s*[<＜]parameter\s([^<>＜＞]{0,1024})[>＞]/y;
+const BARE_PARAM_END_RE = /[<＜]\/parameter\s*[>＞]/g;
+const BARE_PARAM_NEXT_RE = /\s*[<＜](?:parameter\s|\/call\s*[>＞])/y;
+const BARE_CDATA_OPEN_RE = /\s*<!\[CDATA\[/iy;
+
+function matchMarkupAt(re, text, pos) {
+    re.lastIndex = pos;
+    return re.exec(text);
+}
+
+function markupMatchEnd(match) {
+    return match.index + match[0].length;
+}
+
+function parseBareCallBody(value, start) {
+    const args = Object.create(null);
+    const seenNames = new Set();
+    let parameterCount = 0;
+    let pos = start;
+    for (let open; (open = matchMarkupAt(BARE_PARAM_OPEN_RE, value, pos)) !== null;) {
+        if (++parameterCount > MAX_DSML_PARAMETERS) return null;
+        const bodyStart = markupMatchEnd(open);
+        let searchFrom = bodyStart;
+        const cdata = matchMarkupAt(BARE_CDATA_OPEN_RE, value, bodyStart);
+        if (cdata) {
+            const cdataEnd = value.indexOf(']]>', markupMatchEnd(cdata));
+            if (cdataEnd === -1) return null;
+            searchFrom = cdataEnd + 3;
+        }
+        let close;
+        do {
+            close = matchMarkupAt(BARE_PARAM_END_RE, value, searchFrom);
+            if (!close) return null;
+            searchFrom = markupMatchEnd(close);
+        } while (!matchMarkupAt(BARE_PARAM_NEXT_RE, value, searchFrom));
+        if (!parseDsmlParameter(open[1], value.substring(bodyStart, close.index), args, seenNames, true)) return null;
+        pos = searchFrom;
+    }
+    if (parameterCount > 0) {
+        const close = matchMarkupAt(BARE_CALL_CLOSE_RE, value, pos);
+        return close ? { args, end: markupMatchEnd(close) } : null;
+    }
+
+    const close = matchMarkupAt(BARE_CALL_END_RE, value, start);
+    if (!close) return null;
+    const body = value.substring(start, close.index).trim();
+    try { return { args: body ? JSON.parse(body) : {}, end: markupMatchEnd(close) }; }
+    catch (e) { return null; }
+}
+
+function parseBareCallBlocks(text) {
+    const value = String(text || '');
+    if (value.length > MAX_TOOL_MARKUP_CHARS) return [];
+    const calls = [];
+    let pos = 0;
+    for (let open; (open = matchMarkupAt(BARE_CALL_OPEN_RE, value, pos)) !== null;) {
+        const block = open[1].trimEnd().endsWith('/')
+            ? { args: {}, end: markupMatchEnd(open) }
+            : parseBareCallBody(value, markupMatchEnd(open));
+        const call = block && buildToolCall(getMarkupAttribute(open[1], 'name'), block.args);
+        if (!call) return [];
+        calls.push(call);
+        pos = block.end;
+    }
+    return value.substring(pos).trim() ? [] : calls;
 }
 
 function collectAgentToolCalls(text, allowedToolNames) {
@@ -3038,9 +3233,10 @@ function collectAgentToolCalls(text, allowedToolNames) {
         }
         return calls;
     };
-    // Normalize first: a capture can garble the bars and the rune between them, and
-    // the parser only knows the canonical form.
+    // First, so a tool envelope or DSML tag inside a parameter value stays data.
     const normalized = normalizeGarbledDsmlDelimiters(text);
+    const bareCalls = parseBareCallBlocks(normalized);
+    if (bareCalls.length > 0) return keepAllowed(bareCalls);
     const calls = keepAllowed(hasDsmlToolMarkup(normalized) ? listDsmlToolCalls(normalized) : collectJsonToolCalls(normalized));
     if (calls.length > 0 || !hasDsmlToolMarkup(normalized)) return calls;
     const repaired = keepAllowed(listDsmlToolCalls(repairGarbledDsmlStructure(normalized)));
@@ -3055,6 +3251,8 @@ function collectAgentToolCalls(text, allowedToolNames) {
 }
 
 function looksLikeToolCallMarkup(text) {
+    // Case-sensitive and tied to <parameter, so <Call name="x" /> in a JSX or XML answer stays text.
+    if (/[<＜]call\s[^<>＜＞]{0,1024}[>＞]\s*[<＜]parameter\s/.test(String(text || ''))) return true;
     return /TOOL_CALL:\s*[\w-]+|<\s*[|｜]*\s*tool_call\b|[|｜]+\s*DSML\s*[|｜]+|[<＜]\s*\/?\s*(?:DSML)?(?:[\w.-]+:)?(?:tool[\s_-]*calls|function[\s_-]*calls|invoke)\b|["'](?:tool_call|tool_calls|function_call)["']\s*:/i.test(String(text || ''));
 }
 
@@ -3126,7 +3324,7 @@ function parseToolCall(text) {
                         return tc;
                     }
                 } catch (e) {
-                    console.log(`[parseToolCall] legacy JSON.parse failed: ${e.message.substring(0,100)}`);
+                    console.log(`[parseToolCall] legacy JSON.parse failed: ${scrubUpstreamText(e.message).substring(0,100)}`);
                 }
             } else {
                 console.log(`[parseToolCall] TOOL_CALL:${name} found but JSON braces are unbalanced`);
@@ -3745,6 +3943,7 @@ function currentTurnToolMessages(messages) {
     }
     return list.slice(lastUser + 1).filter(msg => msg?.role === 'tool');
 }
+
 const DELIVERABLE_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
 
 // Strictly inside root: `/tmp-extra` is not inside `/tmp`, and `..` does not count.
@@ -4358,13 +4557,21 @@ function lastTurnIsToolResult(messages) {
     return false;
 }
 
+// ASCII \b never fires beside Cyrillic, Hangul, or CJK, so a finished reply in
+// those scripts was retried as an abandoned tool loop. A sentence terminator
+// after a few letters is a final answer in any script; a bare "ok" is not.
+function looksLikeFinalAnswer(text) {
+    if (/(?<![\p{L}\p{N}_])(?:done|completed|fixed|finished|готово|сделано)(?![\p{L}\p{N}_])/iu.test(text)) return true;
+    const letters = text.match(/\p{L}/gu);
+    if (!letters || letters.length < 6) return false;
+    return /[.!?…]|[。！？｡．؟۔।॥]/u.test(text);
+}
+
 function looksLikeAbandonedToolLoop(text, messages) {
     if (!lastTurnIsToolResult(messages)) return false;
     const value = String(text || '').trim();
     if (!value || looksLikeToolCallMarkup(value) || looksLikeCodeDumpInsteadOfTool(value)) return false;
-    // A final answer, not a stop. The English-only list missed "Selesai." and "tests pass".
-    if (FINISHED_MARKER.test(value)) return false;
-    if (/\b(done|completed|fixed|finished|готово|сделано)\b/i.test(value)) return false;
+    if (looksLikeFinalAnswer(value)) return false;
     return value.length < 600;
 }
 
@@ -4464,7 +4671,13 @@ function resolveUpstreamPrompt(session, messages, tools, recoveryHistoryPrefix =
 // === Admin API and dashboard ===
 
 function hostHeaderHostname(host) {
-    try { return new URL(`http://${String(host || '').trim()}`).hostname; } catch (e) { return null; }
+    try {
+        const parsed = new URL(`http://${String(host || '').trim()}`);
+        if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return null;
+        return parsed.hostname;
+    } catch (e) {
+        return null;
+    }
 }
 // The global bearer gate already ran. Without a proxy key, the admin API is limited
 // to direct loopback clients: a request relayed by a local reverse proxy
@@ -4506,6 +4719,130 @@ function adminAccessDecision({ remoteAddress, headers = {} } = {}, { proxyKey = 
     return { allowed: true };
 }
 
+// SO_PEERCRED is AF_UNIX only. For a TCP accept, the peer uid is read from proc:
+// /proc/self/fd/<fd> is socket:[inode], that inode is this process's row in
+// /proc/net/tcp or /proc/net/tcp6, and the uid column on that row is this process.
+// The caller's uid is the other row of the same connection (addresses swapped).
+let localCallerPeerCred = null;
+function socketInodeFromLink(link) {
+    const match = /^socket:\[(\d+)\]$/.exec(String(link || '').trim());
+    return match ? match[1] : null;
+}
+function normalizeProcNetEndpoint(endpoint) {
+    const upper = String(endpoint || '').toUpperCase();
+    const mapped = /^0{16}(?:FFFF0000|0000FFFF)([0-9A-F]{8}:[0-9A-F]{4})$/.exec(upper);
+    return mapped ? mapped[1] : upper;
+}
+function procNetRows(text) {
+    const rows = [];
+    for (const line of String(text || '').split('\n')) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 10) continue;
+        const uid = Number(parts[7]);
+        if (!Number.isInteger(uid) || uid < 0) continue;
+        if (!/^(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{32}):[0-9A-Fa-f]{4}$/.test(parts[1])
+            || !/^(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{32}):[0-9A-Fa-f]{4}$/.test(parts[2])) continue;
+        // Kernel timewait/orphan sockets report inode 0 and hardcode uid 0.
+        if (!/^[1-9]\d*$/.test(parts[9])) continue;
+        rows.push({
+            local: normalizeProcNetEndpoint(parts[1]),
+            remote: normalizeProcNetEndpoint(parts[2]),
+            state: String(parts[3] || '').toUpperCase(),
+            uid,
+            inode: parts[9],
+        });
+    }
+    return rows;
+}
+function peerUidForInode(texts, inode) {
+    const wanted = String(inode || '');
+    if (!/^[1-9]\d*$/.test(wanted)) return { inodeResolved: false, peerUid: null };
+    const rows = [];
+    for (const text of texts || []) rows.push(...procNetRows(text));
+    const own = rows.find(row => row.inode === wanted);
+    if (!own) return { inodeResolved: false, peerUid: null };
+    if (own.state === '0A') return { inodeResolved: true, peerUid: null };
+    const peers = rows.filter(row => row.inode !== own.inode && row.state !== '0A' && row.state !== '06' && row.local === own.remote && row.remote === own.local);
+    const peer = peers.find(row => row.state === '01') || peers[0];
+    return { inodeResolved: true, peerUid: peer ? peer.uid : null };
+}
+function readProcNetTables() {
+    const texts = [];
+    for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) {
+        try {
+            texts.push(fs.readFileSync(file, 'utf8'));
+        } catch (error) {
+            if (error && error.code === 'ENOENT') continue;
+            throw error;
+        }
+    }
+    return texts;
+}
+function peerCredForSocket(socket, { readlink, readTables } = {}) {
+    let fd;
+    try {
+        fd = socket && socket._handle ? socket._handle.fd : undefined;
+    } catch (e) {
+        return { inodeResolved: false, peerUid: null };
+    }
+    if (!Number.isInteger(fd) || fd < 0) return { inodeResolved: false, peerUid: null };
+    const linkOf = readlink || ((n) => fs.readlinkSync(`/proc/self/fd/${n}`));
+    const tablesOf = readTables || readProcNetTables;
+    let link;
+    try {
+        link = linkOf(fd);
+    } catch (e) {
+        return { inodeResolved: false, peerUid: null };
+    }
+    const inode = socketInodeFromLink(link);
+    if (!inode) return { inodeResolved: false, peerUid: null };
+    let texts;
+    try {
+        texts = tablesOf();
+        return peerUidForInode(texts, inode);
+    } catch (e) {
+        return { inodeResolved: false, peerUid: null };
+    }
+}
+function incomingPeerCred(socket) {
+    if (typeof localCallerPeerCred === 'function') return localCallerPeerCred(socket);
+    return peerCredForSocket(socket);
+}
+// Without PROXY_API_KEY, 127.0.0.1 is shared by every account on the machine.
+// On Linux the peer uid has to be this process, and an unreadable or missing
+// proc entry fails closed instead of letting an unverified caller through.
+// Other platforms have no peer uid and keep the loopback requirement.
+function localCallerDecision({ remoteAddress, peerUid = null, inodeResolved = false, platform = process.platform, proxyKey = '', ownUid = null } = {}) {
+    if (proxyKey) return { allowed: true };
+    const forbidden = (message) => ({ allowed: false, status: 403, error: { message, type: 'local_caller_forbidden' } });
+    if (platform !== 'linux') {
+        if (isLoopbackHost(remoteAddress)) return { allowed: true };
+        return forbidden('This proxy has no PROXY_API_KEY and only accepts loopback clients on this platform. Set PROXY_API_KEY to accept other clients.');
+    }
+    if (!inodeResolved) {
+        return forbidden('This proxy has no PROXY_API_KEY and could not verify the local caller. Set PROXY_API_KEY to share it.');
+    }
+    if (!Number.isInteger(ownUid) || peerUid !== ownUid) {
+        return forbidden('This proxy has no PROXY_API_KEY and only accepts connections from the user running it. Set PROXY_API_KEY to share it.');
+    }
+    return { allowed: true };
+}
+function requestLocalCallerDecision(req, { proxyKey = PROXY_API_KEY, platform = process.platform, ownUid = typeof process.getuid === 'function' ? process.getuid() : null, peerCred = null } = {}) {
+    const remoteAddress = req && req.socket ? req.socket.remoteAddress : undefined;
+    if (proxyKey || platform !== 'linux') {
+        return localCallerDecision({ remoteAddress, platform, proxyKey, inodeResolved: false, peerUid: null, ownUid });
+    }
+    const cred = peerCred || incomingPeerCred(req && req.socket);
+    return localCallerDecision({
+        remoteAddress,
+        platform: 'linux',
+        proxyKey: '',
+        inodeResolved: Boolean(cred && cred.inodeResolved),
+        peerUid: cred && Number.isInteger(cred.peerUid) ? cred.peerUid : null,
+        ownUid,
+    });
+}
+
 function adminAccountStatus(account, now = Date.now()) {
     if (!accountHasCredentials(account)) return 'no_credentials';
     if (!isAccountEnabled(account)) return 'disabled';
@@ -4541,7 +4878,7 @@ function adminAccountView(account, now = Date.now()) {
         busy_since: lock?.since || null,
         failures: account.failures || 0,
         total_failures: account.totalFailures || 0,
-        last_error: account.lastError ? { ...account.lastError } : null,
+        last_error: account.lastError ? { ...account.lastError, message: scrubLogText(account.lastError.message) ?? account.lastError.message } : null,
         last_success_at: account.lastSuccessAt || null,
         last_used_at: account.lastUsedAt || null,
         usage: {
@@ -4868,6 +5205,7 @@ function adminArchiveAccount(account) {
     const archived = `${file}.removed-${Date.now()}`;
     try {
         fs.renameSync(file, archived);
+        if (process.platform !== 'win32') fs.chmodSync(archived, 0o600);
     } catch (e) {
         throw new AdminHttpError(500, 'auth_file_write_failed', `Could not archive ${path.basename(file)}: ${e.code || 'error'}`);
     }
@@ -4902,6 +5240,7 @@ function adminRestoreAccount(body) {
     const before = new Set(accounts.map(a => a.id));
     try {
         fs.renameSync(archived, target);
+        if (process.platform !== 'win32') fs.chmodSync(target, 0o600);
     } catch (e) {
         throw new AdminHttpError(500, 'auth_file_write_failed', `Could not restore ${name}: ${e.code || 'error'}`);
     }
@@ -4952,6 +5291,8 @@ async function handleUpdateRequest(req, res, parts) {
             const body = await readAdminJsonBody(req);
             const channel = body && typeof body.channel === 'string' ? body.channel : undefined;
             if (parts[2] === 'check') return adminJson(res, 200, await updater.check(channel));
+            // The summary is the one check() already builds. Nothing is merged until confirm:true.
+            if (body.confirm !== true) return adminJson(res, 409, await updater.check(channel));
             if (updateBusy) return adminError(res, 409, 'update_in_progress', 'An update is already being installed.');
             updateBusy = true;
             try {
@@ -5015,7 +5356,7 @@ function agentsLocalDecision({ remoteAddress, headers = {} } = {}, { port = PORT
     return {
         allowed: false,
         status: 403,
-        error: { type: 'agents_local_only', message: `Agent config files are only shown to a browser on the machine running the proxy. Open the dashboard at http://127.0.0.1:${port}/dashboard on that machine.` },
+        error: { type: 'agents_local_only', message: `Agent config files are only shown to a browser on the machine running the proxy. Open the dashboard at ${publicScheme()}://127.0.0.1:${port}/dashboard on that machine.` },
     };
 }
 
@@ -5031,7 +5372,7 @@ function agentProxyFacts(mod) {
         let host = String(HOST || '').trim().replace(/^\[|\]$/g, '');
         if (!host || host === '0.0.0.0' || host === '::') host = '127.0.0.1';
         if (net.isIPv6(host)) host = `[${host}]`;
-        return `http://${host}:${agentListenPort()}`;
+        return `${publicScheme()}://${host}:${agentListenPort()}`;
     };
     let baseUrl;
     let baseSource;
@@ -5504,11 +5845,18 @@ async function serveDashboard(req, res, pathname) {
 // === HTTP Server ===
 // HTTP unless both TLS PEM files are set. Read once at load so a broken pair
 // fails before the port is opened, not on the first request.
-const TLS_CREDENTIALS = readTlsCredentials();
-const publicScheme = () => TLS_CREDENTIALS ? 'https' : 'http';
-const server = (TLS_CREDENTIALS ? https.createServer(TLS_CREDENTIALS, handler) : http.createServer(handler));
-
 async function handler(req, res) {
+    const remoteIp = guardIp(req);
+    const remoteClient = !isLoopbackHost(remoteIp);
+    if (remoteClient) {
+        const gate = remoteGuard.check(remoteIp);
+        if (!gate.allowed) {
+            res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(gate.retryAfter), Connection: 'close' });
+            res.end(JSON.stringify({ error: { message: 'Too many requests from this address', type: 'rate_limit' } }));
+            return;
+        }
+    }
+
     const requestOrigin = req.headers.origin;
     res.setHeader('Vary', 'Origin');
     if (!isBrowserOriginAllowed(requestOrigin)) {
@@ -5518,14 +5866,13 @@ async function handler(req, res) {
     }
     if (requestOrigin) res.setHeader('Access-Control-Allow-Origin', normalizeOrigin(requestOrigin));
     setCorsResponseHeaders(res);
-    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-    const localCaller = localCallerDecision(req);
-    if (!localCaller.allowed) {
-        res.writeHead(localCaller.status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: localCaller.error }));
+    const caller = requestLocalCallerDecision(req);
+    if (!caller.allowed) {
+        res.writeHead(caller.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: caller.error }));
         return;
     }
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -5536,6 +5883,7 @@ async function handler(req, res) {
 
     const isPublicProbe = req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/readyz' || url.pathname === '/v2/health' || url.pathname === '/api/info' || isDashboardPath(url.pathname));
     if (!isPublicProbe && !isProxyAuthorized(req.headers.authorization)) {
+        if (remoteClient) remoteGuard.failedAuth(remoteIp);
         res.writeHead(401, {
             'Content-Type': 'application/json',
             'WWW-Authenticate': 'Bearer',
@@ -5567,7 +5915,13 @@ async function handler(req, res) {
 
     // Health check
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
-        const includePrivateStatus = !PROXY_API_KEY || isProxyAuthorized(req.headers.authorization);
+        // Private fields name accounts, locks, and agents. With no proxy key they
+        // follow the admin rule (loopback peer, no forwarding headers, loopback
+        // Host, Origin only when it is that Host). A set key still hides them
+        // until the request presents it.
+        const includePrivateStatus = PROXY_API_KEY
+            ? isProxyAuthorized(req.headers.authorization)
+            : adminAccessDecision({ remoteAddress: req.socket.remoteAddress, headers: req.headers }).allowed;
         const health = { status: 'ok', service: 'FreeDeepseekAPI' };
         if (includePrivateStatus) Object.assign(health, {
             models: SUPPORTED_MODEL_IDS,
@@ -5618,8 +5972,14 @@ async function handler(req, res) {
         return;
     }
 
-    // Sessions status
+    // Sessions status. With no proxy key this is an admin read: another loopback
+    // origin can still call chat (Open WebUI) but must not list sessions.
     if (req.method === 'GET' && url.pathname === '/v1/sessions') {
+        const access = adminAccessDecision({ remoteAddress: req.socket.remoteAddress, headers: req.headers });
+        if (!access.allowed) {
+            jsonResponse(res, access.status, { error: access.error });
+            return;
+        }
         const agentList = [];
         for (const [agentId, session] of sessions) {
             agentList.push({
@@ -5641,8 +6001,14 @@ async function handler(req, res) {
         return;
     }
 
-    // Reset session for a specific agent (or all if no agent specified)
+    // Reset session for a specific agent (or all if no agent specified).
+    // Same admin rule as GET /v1/sessions when no proxy key is set.
     if (req.method === 'POST' && url.pathname === '/reset-session') {
+        const access = adminAccessDecision({ remoteAddress: req.socket.remoteAddress, headers: req.headers });
+        if (!access.allowed) {
+            jsonResponse(res, access.status, { error: access.error });
+            return;
+        }
         const agentId = url.searchParams.get('agent') || 'default';
         if (agentId === 'all') {
             const count = sessions.size;
@@ -5818,6 +6184,7 @@ async function handler(req, res) {
                 const existing = sessions.get(agentId);
                 const historyCount = existing ? existing.history.length : 0;
                 sessions.set(agentId, createSession());
+                evictLeastRecentlyUsedSessions(agentId);
                 console.log(`${agentTag} /new received — session reset (history cleared: ${historyCount})`);
                 const confirmation = buildTextResponse('Started a new chat. Session and history have been reset.', '/new', requestedModel);
                 logRow.status = 200;
@@ -6320,7 +6687,7 @@ async function handler(req, res) {
                 res.writeHead(failureClass.status, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({
                     error: {
-                        message: errorMessage,
+                        message: scrubLogText(errorMessage) ?? errorMessage,
                         type: errorType,
                         agent: agentId,
                         failed_session_id: failure.failedSessionId,
@@ -6422,7 +6789,8 @@ async function handler(req, res) {
                 toolCall = null;
             }
 
-            const dsmlCalls = listDsmlToolCalls(fullContent);
+            const bareCalls = parseBareCallBlocks(fullContent);
+            const dsmlCalls = bareCalls.length > 0 ? bareCalls : listDsmlToolCalls(fullContent);
             const nativeOnlyDsml = dsmlCalls.length > 0 && dsmlCalls.every(call => isDeepSeekNativeTool(call.name));
             const shouldRepairNative = !noToolsMode && !toolCall && (Boolean(ignoredNativeTool) || nativeOnlyDsml);
             const shouldRepairMarkup = !noToolsMode && !toolCall && !shouldRepairNative && looksLikeToolCallMarkup(fullContent);
@@ -6654,9 +7022,9 @@ async function handler(req, res) {
                 return;
             }
             
-            // Check if any tool results in the current conversation contained a screenshot path.
-            // If so, and the response doesn't already have MEDIA:, inject it so the gateway
-            // delivers the file to Telegram.
+            // If this turn's tool results named a temp-dir screenshot and the reply
+            // does not already contain MEDIA:, append that path so the gateway can
+            // deliver the file (for example to Telegram). Other client paths are ignored.
             if (!fullContent.includes('MEDIA:')) {
                 const screenshotPaths = extractScreenshotPaths(messages);
                 if (screenshotPaths.length > 0) {
@@ -6713,14 +7081,15 @@ async function handler(req, res) {
                 console.log(`${agentTag} Response ${apiMode} (tools=${executableCalls.length}, ${Date.now() - startTime}ms, ${fullContent.length} chars)`);
             }
         } catch (e) {
-            console.log('[DS-API] Error:', e.message);
+            const publicErrorMessage = e instanceof SyntaxError ? 'Request body is not valid JSON' : (scrubLogText(e.message) ?? e.message);
+            console.log('[DS-API] Error:', publicErrorMessage);
             if (clientGone && !res.headersSent) {
-                logError(499, 'client_disconnected', `Client disconnected: ${e.message}`);
+                logError(499, 'client_disconnected', `Client disconnected: ${publicErrorMessage}`);
                 return;
             }
             if (res.headersSent) {
                 logRow.error_type = logRow.error_type || e.type || 'server_error';
-                logRow.error_message = logRow.error_message || e.message;
+                logRow.error_message = logRow.error_message || publicErrorMessage;
                 return;
             }
             // Pool exhaustion / no-auth carry an explicit status so integrators see
@@ -6730,7 +7099,7 @@ async function handler(req, res) {
             const status = e.status || (overflowError ? 400 : (timedOut ? 504 : 500));
             const errorType = e.type || (overflowError ? 'context_length_exceeded' : (timedOut ? 'request_timeout' : 'server_error'));
             // A body that is not JSON surfaces as a SyntaxError whose text quotes the body.
-            logError(status, errorType, e instanceof SyntaxError ? 'Request body is not valid JSON' : e.message);
+            logError(status, errorType, e instanceof SyntaxError ? 'Request body is not valid JSON' : publicErrorMessage);
             logRow.account = activeSession?.accountId || null;
             const headers = { 'Content-Type': 'application/json' };
             if (status === 429 && e.retryAfter) headers['Retry-After'] = String(e.retryAfter);
@@ -6740,7 +7109,7 @@ async function handler(req, res) {
                 : null;
             if (timedOut && activeSession?.id) console.log(`[${activeAgentId}] Keeping chat ${activeSession.id} after timeout.`);
             res.end(JSON.stringify({ error: {
-                message: e.message,
+                message: publicErrorMessage,
                 type: errorType,
                 ...(failure ? {
                     agent: activeAgentId,
@@ -6762,6 +7131,26 @@ async function handler(req, res) {
         }
     });
 }
+
+const tlsCredentials = readTlsCredentials();
+function publicScheme() {
+    return tlsCredentials ? 'https' : 'http';
+}
+function createListenServer(handler) {
+    if (!tlsCredentials) return http.createServer(handler);
+    try {
+        return https.createServer({ cert: tlsCredentials.cert, key: tlsCredentials.key }, handler);
+    } catch (error) {
+        throw new Error(`TLS_CERT_FILE and TLS_KEY_FILE are not a usable PEM certificate and key: ${error.message}`);
+    }
+}
+const server = createListenServer(handler);
+// Slow or endless requests must not hold sockets open. Streamed answers are not affected: these
+// cover receiving the request only.
+server.headersTimeout = 15000;
+server.requestTimeout = 120000;
+server.maxConnections = envNumber('PROXY_MAX_CONNECTIONS', 1024);
+server.on('connection', (socket) => guardConnection(socket));
 
 async function runAuthScript() {
     const script = path.join(__dirname, 'scripts', 'deepseek_chrome_auth.js');
@@ -6811,7 +7200,7 @@ function dashboardUrl(host, port) {
     const h = String(host || '127.0.0.1');
     // A wildcard bind address is not something a browser can open.
     const target = (h === '0.0.0.0' || h === '::' || h === '') ? '127.0.0.1' : h;
-    return `http://${target.includes(':') ? `[${target}]` : target}:${port}/dashboard`;
+    return `${publicScheme()}://${target.includes(':') ? `[${target}]` : target}:${port}/dashboard`;
 }
 function openDashboardInBrowser(url) {
     const { cmd, args } = browserOpenCommand(process.platform, url);
@@ -6879,6 +7268,8 @@ async function main() {
             console.warn('[DS-API] WARNING: PROXY_ADMIN_ALLOW_REMOTE=1 without PROXY_API_KEY lets anyone on the network pause, resume, and reload your DeepSeek accounts.');
         }
     }
+    const cleartextWarning = cleartextStartupWarning(HOST, Boolean(tlsCredentials));
+    if (cleartextWarning) console.warn(cleartextWarning);
     const startup = await showStartupMenu();
     if (!startup.start) process.exit(0);
     server.on('error', (err) => {
@@ -6972,6 +7363,7 @@ module.exports = {
         repairTruncatedJsonEnvelope,
         listDsmlToolCalls,
         collectAgentToolCalls,
+        parseBareCallBlocks,
         buildToolCallResponse,
         selectAgentToolCall,
         parseDsmlToolCall,
@@ -7053,7 +7445,6 @@ module.exports = {
         materializeImageInput,
         readTlsCredentials,
         localCallerDecision,
-        isLoopbackHostHeader,
         isPrivateNetworkAddress,
         ipv4FromMappedIpv6,
         parseIpv6Groups,
@@ -7088,9 +7479,11 @@ module.exports = {
         activeAgentRequests,
         MAX_CONCURRENT,
         MAX_AGENT_SESSIONS,
+        MAX_SESSIONS: MAX_AGENT_SESSIONS,
         scrubLogText,
         scrubUpstreamText,
         sessions,
+        getOrCreateAgentSession,
         accounts,
         selectAccountForSession,
         dashboardUrl,
@@ -7109,11 +7502,26 @@ module.exports = {
         clientIp,
         modelCostUsd,
         isProxyAuthorized,
+        createRemoteGuard,
+        guardConnection,
+        guardIp,
         loadProxyApiKey,
         requireProxyApiKey,
         isLoopbackHost,
+        readTlsCredentials,
+        cleartextStartupWarning,
+        publicScheme,
+        isPrivateNetworkAddress,
+        assertPublicImageUrl,
         normalizeOrigin,
         isBrowserOriginAllowed,
+        socketInodeFromLink,
+        procNetRows,
+        peerUidForInode,
+        peerCredForSocket,
+        localCallerDecision,
+        requestLocalCallerDecision,
+        useLocalCallerPeerCred(next) { const prev = localCallerPeerCred; localCallerPeerCred = next; return () => { localCallerPeerCred = prev; }; },
         DEFAULT_MODEL_ID,
         canonicalizeModelId,
         MODEL_CONFIGS,

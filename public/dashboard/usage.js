@@ -17,7 +17,7 @@
 
   function mount(root) {
     st.root = root;
-    const windowSeg = F.segmented('Window', WINDOWS, st.window, (v) => { st.window = v; syncHash(); load(); });
+    const windowSeg = F.segmented(F.t('Window'), WINDOWS, st.window, (v) => { st.window = v; syncHash(); load(); });
     const accountSlot = h('div', { class: 'account-filter' });
     const caveat = h('div', { class: 'caveat' });
     const status = h('div', { class: 'usage-status' });
@@ -26,29 +26,29 @@
     const reqHost = h('div', { class: 'chart-host' });
     const breakdown = h('div', { class: 'breakdowns' });
     const lifetime = h('div');
-    const metricSeg = F.segmented('Breakdown metric', METRICS, st.metric, (v) => { st.metric = v; renderBreakdowns(); });
+    const metricSeg = F.segmented(F.t('Breakdown metric'), METRICS.map(m => ({ ...m, label: F.t(m.label) })), st.metric, (v) => { st.metric = v; renderBreakdowns(); });
     const body = h('div', { class: 'usage-body' },
       readouts,
       h('div', { class: 'rule' }),
       h('section', { class: 'section' },
-        h('div', { class: 'section-head' }, h('h3', { class: 'section-title', text: 'Tokens over time' }),
+        h('div', { class: 'section-head' }, h('h3', { class: 'section-title' }, F.icon('token', 'title-icon'), h('span', { text: F.t('Tokens over time') })),
           h('div', { class: 'section-controls' }, h('ul', { class: 'legend', 'aria-label': 'Series' },
             h('li', null, h('span', { class: 'key key-data-2', 'aria-hidden': 'true' }), 'Prompt'),
             h('li', null, h('span', { class: 'key key-data-1', 'aria-hidden': 'true' }), 'Completion')), modeToggle('tokens'))),
         tokensHost),
       h('section', { class: 'section section-tight' },
-        h('div', { class: 'section-head' }, h('h3', { class: 'section-title', text: 'Requests and errors' }),
+        h('div', { class: 'section-head' }, h('h3', { class: 'section-title' }, F.icon('requests', 'title-icon'), h('span', { text: F.t('Requests and errors') })),
           h('div', { class: 'section-controls' }, h('ul', { class: 'legend', 'aria-label': 'Series' },
             h('li', null, h('span', { class: 'key key-ink', 'aria-hidden': 'true' }), 'Requests'),
             h('li', null, F.lamp('error', 'key-x'), 'Errors')), modeToggle('requests'))),
         reqHost),
       h('div', { class: 'rule' }),
       h('section', { class: 'section' },
-        h('div', { class: 'section-head' }, h('h3', { class: 'section-title', text: 'Where it went' }), h('div', { class: 'section-controls' }, metricSeg, modeToggle('breakdown'))),
+        h('div', { class: 'section-head' }, h('h3', { class: 'section-title' }, F.icon('route', 'title-icon'), h('span', { text: F.t('Where it went') })), h('div', { class: 'section-controls' }, metricSeg, modeToggle('breakdown'))),
         breakdown),
       h('div', { class: 'rule' }),
-      h('section', { class: 'section' }, h('div', { class: 'section-head' }, h('h3', { class: 'section-title', text: 'Lifetime by account' })), lifetime));
-    const hero = F.pageHero({ icon: 'usage', label: 'Usage' });
+      h('section', { class: 'section' }, h('div', { class: 'section-head' }, h('h3', { class: 'section-title' }, F.icon('accounts', 'title-icon'), h('span', { text: F.t('Lifetime by account') }))), lifetime));
+    const hero = F.pageHero({ label: F.t('Usage') });
     root.append(hero, h('div', { class: 'view-pad' },
       h('div', { class: 'filter-row' }, windowSeg, accountSlot),
       caveat, status, body));
@@ -57,7 +57,7 @@
   }
 
   function modeToggle(key) {
-    return F.segmented('View as', [{ value: 'chart', icon: 'chart-view', ariaLabel: 'Chart' }, { value: 'table', icon: 'table-view', ariaLabel: 'Table' }], st.modes[key], (v) => {
+    return F.segmented(F.t('View as'), [{ value: 'chart', icon: 'chart-view', ariaLabel: F.t('Chart') }, { value: 'table', icon: 'table-view', ariaLabel: 'Table' }], st.modes[key], (v) => {
       st.modes[key] = v;
       render();
     });
@@ -159,13 +159,14 @@
       lifetime.replaceChildren();
       return;
     }
+    const last = `last ${d.window.key}`;
     readouts.replaceChildren(
-      readout(fmt.int(t.requests), 'requests'),
-      readout(`${fmt.compact(t.prompt_tokens + t.completion_tokens)} ≈`, 'tokens'),
-      readout(`${fmt.compact(t.prompt_tokens)} / ${fmt.compact(t.completion_tokens)} ≈`, 'prompt / completion'),
-      readout(`${fmt.usd(t.usd)} ≈`, 'at API prices'),
-      readout(t.requests ? fmt.pct(errRate) : '—', `errors (${fmt.int(t.errors)})`, t.errors ? 'crit' : null),
-      readout(t.avg_ms ? fmt.ms(t.avg_ms) : '—', 'average latency'));
+      readout(fmt.int(t.requests), 'requests', null, 'requests', last),
+      readout(`${fmt.compact(t.prompt_tokens + t.completion_tokens)} ≈`, 'tokens', null, 'token', 'estimated'),
+      readout(`${fmt.compact(t.prompt_tokens)} / ${fmt.compact(t.completion_tokens)} ≈`, 'prompt / completion', null, 'route', 'estimated'),
+      readout(`${fmt.usd(t.usd)} ≈`, 'at API prices', null, 'usage', 'what the paid API would bill'),
+      readout(t.requests ? fmt.pct(errRate) : '—', `errors (${fmt.int(t.errors)})`, t.errors ? 'crit' : null, 'alert', 'of requests'),
+      readout(t.avg_ms ? fmt.ms(t.avg_ms) : '—', 'average latency', null, 'latency', last));
 
     const xLabel = xLabelFor(d.bucket.ms);
     const series = d.series || [];
@@ -287,12 +288,16 @@
     return api ? F.hashFor('requests', '', { api }) : null;
   }
 
-  function readout(value, label, tone) {
-    return h('div', { class: 'readout' }, h('p', { class: ['readout-value', tone && `is-${tone}`], text: value }), h('p', { class: 'readout-label', text: label }));
+  // One cell of the readout card: icon and name, the number, and what the number covers.
+  function readout(value, label, tone, icon, hint) {
+    return h('div', { class: 'readout' },
+      h('p', { class: 'readout-label' }, F.icon(icon, 'readout-icon'), h('span', { text: label })),
+      h('p', { class: ['readout-value', tone && `is-${tone}`], text: value }),
+      h('p', { class: 'readout-hint', text: hint }));
   }
 
   F.views.usage = {
-    title: 'Usage',
+    title: () => F.t('Usage'),
     live: true,
     mount,
     show(route) {

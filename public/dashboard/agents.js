@@ -9,15 +9,17 @@
   const F = window.FDSA;
   const { h, fmt } = F;
 
-  // Fixed order and marks. Hue feeds the same oklch formula as account avatars; the square
-  // shape keeps an agent from ever reading as an account (circles).
+  // Fixed order and marks. Each agent shows its own logo (sprite symbol #a-<id>) as its brand's
+  // avatar draws it (Lobe Icons): the tile colour, the mark colour (null keeps the logo's own
+  // colours) and how much of the tile the mark fills. The square shape keeps an agent from
+  // ever reading as an account (circles).
   const AGENTS = [
-    { id: 'claude-code', name: 'Claude Code', mono: 'CC', hue: 32 },
-    { id: 'codex', name: 'Codex', mono: 'CX', hue: 255 },
-    { id: 'opencode', name: 'OpenCode', mono: 'OC', hue: 160 },
-    { id: 'hermes', name: 'Hermes', mono: 'HE', hue: 300 },
-    { id: 'openclaw', name: 'OpenClaw', mono: 'OW', hue: 12 },
-    { id: 'cursor', name: 'Cursor', mono: 'CU', hue: 210 },
+    { id: 'claude-code', name: 'Claude Code', bg: '#09090B', fg: '#D97757', scale: 0.7 },
+    { id: 'codex', name: 'Codex', bg: '#FFFFFF', fg: null, scale: 0.7 },
+    { id: 'opencode', name: 'OpenCode', bg: '#000000', fg: '#FFFFFF', scale: 0.75 },
+    { id: 'hermes', name: 'Hermes', bg: '#FFFFFF', fg: '#000000', scale: 0.75 },
+    { id: 'openclaw', name: 'OpenClaw', bg: '#000000', fg: null, scale: 0.75 },
+    { id: 'cursor', name: 'Cursor', bg: '#000000', fg: '#FFFFFF', scale: 0.6 },
   ];
   const META = Object.fromEntries(AGENTS.map(a => [a.id, a]));
   const STATES = {
@@ -119,10 +121,22 @@
     return known.some(k => k.origin === b.origin) ? null : b.host;
   }
 
+  // The agent's logo on its brand tile. An agent this dashboard does not know yet (a newer
+  // server) has no logo here and keeps its initials on a neutral tile.
   function mark(id, cls) {
     const m = META[id];
-    const el = h('span', { class: ['agent-mark', cls], 'aria-hidden': 'true', text: m ? m.mono : String(id).slice(0, 2).toUpperCase() });
-    el.style.setProperty('--agent-h', String(m ? m.hue : 220));
+    const el = h('span', { class: ['agent-mark', cls], 'aria-hidden': 'true' });
+    if (!m) { el.textContent = String(id).slice(0, 2).toUpperCase(); return el; }
+    el.style.setProperty('--agent-bg', m.bg);
+    if (m.fg) el.style.setProperty('--agent-fg', m.fg);
+    el.style.setProperty('--agent-scale', String(m.scale));
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'agent-logo');
+    svg.setAttribute('focusable', 'false');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', `#a-${id}`);
+    svg.append(use);
+    el.append(svg);
     return el;
   }
 
@@ -201,7 +215,6 @@
       kind: 'file',
       fileId: a.entry_file,
       label: manual ? 'Cursor settings (in the app)' : entry ? entry.display_path : a.entry_file,
-      short: manual ? 'Cursor settings' : baseName(entry ? entry.display_path : a.entry_file),
       sub: fileSub,
       tone: fileTone,
       mono: !manual,
@@ -211,12 +224,12 @@
     if (s.base_url) {
       const elsewhere = s.points_here === false;
       proxy = {
-        label: hostOf(s.base_url), short: hostOf(s.base_url).replace(/\/v1$/, ''), mono: true,
+        label: hostOf(s.base_url), mono: true,
         sub: elsewhere ? 'Another address' : has('key_differs') ? 'Sends an old access key' : 'This proxy',
         tone: elsewhere || has('key_differs') ? 'warn' : null,
       };
     } else {
-      proxy = { label: hostOf(proxyBase), short: hostOf(proxyBase), mono: true, sub: manual ? 'Paste into Cursor' : 'This proxy, not used yet', tone: null, muted: true };
+      proxy = { label: hostOf(proxyBase), mono: true, sub: manual ? 'Paste into Cursor' : 'This proxy, not used yet', tone: null, muted: true };
     }
 
     let model;
@@ -224,9 +237,9 @@
       const info = modelById(s.model);
       const sub = !info ? 'Not served by this proxy'
         : s.model_written ? 'Older ID, still served' : features(info);
-      model = { label: info ? info.id : s.model, short: fmt.shortModel(info ? info.id : s.model), mono: true, sub, tone: info ? null : 'warn' };
+      model = { label: info ? info.id : s.model, mono: true, sub, tone: info ? null : 'warn' };
     } else {
-      model = { label: 'No model yet', short: 'no model', sub: manual ? 'Picked in Cursor' : 'Pick one below', tone: null, muted: true };
+      model = { label: 'No model yet', sub: manual ? 'Picked in Cursor' : 'Pick one below', tone: null, muted: true };
     }
 
     const links = [
@@ -235,19 +248,6 @@
       !s.model || !wired || s.points_here !== true ? null : has('model_unknown') ? 'is-warn' : 'is-live',
     ];
     return { nodes: [{ kind: 'agent', ...tool }, file, proxy, { kind: 'model', ...model }], links };
-  }
-
-  // Overview row: file → proxy → model as dots and short labels. Decorative; the row's own
-  // text carries the same facts for assistive tech.
-  function smallPath(a) {
-    const p = pathModel(a);
-    const ol = h('ol', { class: 'sigpath sigpath-sm', 'aria-hidden': 'true' });
-    p.nodes.slice(1).forEach((n, i) => {
-      if (i) ol.append(h('li', { class: ['sig-link', p.links[i]] }));
-      ol.append(h('li', { class: ['sig-node', n.tone && `is-${n.tone}`, n.muted && 'is-muted', p.links[i] === 'is-live' && 'is-on'] },
-        h('span', { class: 'sig-dot' }), h('span', { class: 'sig-label', translate: 'no', text: n.short })));
-    });
-    return ol;
   }
 
   function bigPath(a) {
@@ -755,7 +755,7 @@
   function mount(root) {
     st.root = root;
     // Overview
-    const heroO = F.pageHero({ icon: 'agent', label: 'Coding agents' });
+    const heroO = F.pageHero({ label: 'Coding agents' });
     const ovBanner = h('div', { class: 'view-banner' });
     const roster = h('ul', { class: 'agents-roster set-group', role: 'list', 'aria-label': 'Agents' });
     // The j/k cursor follows Tab focus, so Enter and j/k always agree on the row.
@@ -767,28 +767,28 @@
     });
     const rosterSection = h('section', { class: 'agents-section', 'aria-labelledby': 'agents-roster-title' },
       h('header', { class: 'settings-head' },
-        h('h2', { class: 'settings-title', id: 'agents-roster-title', text: 'Agents' }),
+        h('h2', { class: 'settings-title', id: 'agents-roster-title' }, F.icon('agent', 'title-icon'), h('span', { text: F.t('Agents') })),
         h('p', { class: 'settings-desc', text: 'Each agent reads its own config file. Pick one to see the file and point it at this proxy.' })),
       roster);
     const backupBody = h('div', { class: 'set-stack' });
     const backupSection = h('section', { class: 'agents-section', id: 'agents-backups', 'aria-labelledby': 'agents-backups-title' },
       h('header', { class: 'settings-head' },
-        h('h2', { class: 'settings-title', id: 'agents-backups-title', text: 'Restore points' }),
+        h('h2', { class: 'settings-title', id: 'agents-backups-title' }, F.icon('undo', 'title-icon'), h('span', { text: F.t('Restore points') })),
         h('p', { class: 'settings-desc', text: 'Every apply backs up the files it changes first. Restoring also deletes files that setup created.' })),
       backupBody);
     const overview = h('div', { class: 'agents-page' }, heroO,
       h('div', { class: 'view-pad agents' }, ovBanner, rosterSection, backupSection));
 
     // Detail
-    const heroD = F.pageHero({ icon: 'agent', label: 'Agent' });
+    const heroD = F.pageHero({ label: 'Agent' });
     heroD.classList.add('hero-agent');
     const pathHost = h('div', { class: 'agent-path-host' });
     const dBanner = h('div', { class: 'view-banner' });
 
     const modelHost = h('div', { class: 'set-stack' });
     const modeHost = h('div');
-    const secModel = cfgSection('Model', 'cfg-model', modelHost);
-    const secMode = cfgSection('Install as', 'cfg-mode', modeHost);
+    const secModel = cfgSection('Model', 'cfg-model', 'model', modelHost);
+    const secMode = cfgSection('Install as', 'cfg-mode', 'download', modeHost);
 
     const base = h('input', {
       class: 'input', id: 'agent-base', type: 'url', name: 'base_url', inputmode: 'url', autocomplete: 'off', spellcheck: 'false',
@@ -804,14 +804,14 @@
     const useOrigin = h('div', { class: 'base-use' });
     const baseError = h('p', { class: 'form-error base-error', id: 'agent-base-error', role: 'alert', hidden: true });
     const baseHint = h('p', { class: 'field-help', id: 'agent-base-hint' });
-    const secBase = cfgSection('Proxy address', 'cfg-base',
+    const secBase = cfgSection('Proxy address', 'cfg-base', 'route',
       h('div', { class: 'set-group' },
         h('div', { class: 'set-row set-row-form base-row' },
           h('label', { class: 'sr-only', for: 'agent-base', text: 'Proxy address' }), base, useOrigin)),
       baseHint, baseError);
 
     const keyHost = h('div');
-    const secKey = cfgSection('Access key', 'cfg-key', keyHost);
+    const secKey = cfgSection('Access key', 'cfg-key', 'key', keyHost);
     const notesHost = h('div', { class: 'set-stack cfg-notes' });
     const usageHost = h('div');
     // The apply bar is built once and updated in place: its alert and live summary must not be
@@ -865,9 +865,9 @@
     document.getElementById('app').classList.toggle('agents-scrolled', past);
   }
 
-  function cfgSection(title, id, ...body) {
+  function cfgSection(title, id, icon, ...body) {
     return h('section', { class: 'cfg-section', 'aria-labelledby': id },
-      h('h2', { class: 'cfg-title', id, text: title }), ...body);
+      h('h2', { class: 'cfg-title', id }, F.icon(icon, 'title-icon'), h('span', { text: F.t(title) })), ...body);
   }
 
   // ---------------------------------------------------------------- paint: overview
@@ -951,7 +951,7 @@
       if (!st.data) {
         ul.setAttribute('aria-busy', 'true');
         ul.replaceChildren(...AGENTS.map(() => h('li', null, h('div', { class: 'agent-row is-skel' },
-          skel(36, 36, 'skel-mark'), h('span', { class: 'agent-id' }, skel(140, 14), skel(220, 10)), h('span'), skel(72, 24, 'skel-pill'), h('span')))));
+          skel(36, 36, 'skel-mark'), h('span', { class: 'agent-id' }, skel(140, 14), skel(220, 10)), skel(72, 24, 'skel-pill'), h('span')))));
         return;
       }
       ul.removeAttribute('aria-busy');
@@ -969,8 +969,7 @@
     const link = h('a', { class: ['agent-row', st.cursor === a.id && 'is-cursor'], href: F.hashFor('agents', a.id), 'data-id': a.id, 'data-focus-key': `row-${a.id}` },
       mark(a.id),
       h('span', { class: 'agent-id' }, h('span', { class: 'agent-name', text: a.name }), sub),
-      smallPath(a),
-      h('span', { class: `agent-state is-${s.tone}` }, F.lamp(s.lamp), h('span', { text: s.label })),
+      h('span', { class: `agent-state is-${s.tone}` }, F.lamp(s.lamp), h('span', { text: F.t(s.label) })),
       F.icon('chevron-right', 'agent-chev'));
     return h('li', null, link);
   }
@@ -1179,11 +1178,11 @@
         type: 'button', role: 'radio', class: ['channel-tile', on && 'is-on'], 'aria-checked': String(on),
         tabindex: on || (!anyOn && i === 0) ? '0' : '-1', 'data-value': md.value, 'data-focus-key': `mode-${md.value}`,
       },
-      h('span', { class: 'channel-dot', 'aria-hidden': 'true' }),
       h('span', { class: 'channel-text' },
         h('span', { class: 'channel-title' }, h('span', { text: md.title }), a.setup.mode === md.value ? h('span', { class: 'channel-current', text: 'Now' }) : null),
         h('span', { class: 'channel-desc', text: md.description }),
-        md.writes.length ? h('span', { class: 'channel-writes' }, 'Writes ', ...listNodes(md.writes.map(fileLabel), (v) => h('code', { class: 'mono-id', translate: 'no', text: v }))) : null));
+        md.writes.length ? h('span', { class: 'channel-writes' }, 'Writes ', ...listNodes(md.writes.map(fileLabel), (v) => h('code', { class: 'mono-id', translate: 'no', text: v }))) : null),
+      F.icon('check', 'channel-check'));
       b.addEventListener('click', () => { if (md.value !== opts().mode) setOpt('mode', md.value); });
       return b;
     });
@@ -1335,7 +1334,7 @@
       : 'Set OpenAI API Key to this proxy\'s PROXY_API_KEY.';
     const code = (t) => h('code', { class: 'mono-id', translate: 'no', text: t });
     return h('section', { class: 'cfg-section manual', 'aria-labelledby': 'cfg-manual' },
-      h('h2', { class: 'cfg-title', id: 'cfg-manual', text: 'Set it up in Cursor' }),
+      h('h2', { class: 'cfg-title', id: 'cfg-manual' }, F.icon('agent', 'title-icon'), h('span', { text: 'Set it up in Cursor' })),
       h('ol', { class: 'manual-steps' },
         h('li', null, `Open Cursor Settings, then Models. ${keyText}`),
         h('li', null, h('span', { text: 'Turn on Override OpenAI Base URL and paste:' }), baseMissing() ? null : F.codeLine(base)),
@@ -1547,7 +1546,7 @@
     if (!a.writable) return;
     if (!host.firstChild) {
       host.append(h('header', { class: 'settings-head' },
-        h('h2', { class: 'settings-title', id: 'agent-restore-title', text: 'Restore points' }),
+        h('h2', { class: 'settings-title', id: 'agent-restore-title' }, F.icon('undo', 'title-icon'), h('span', { text: F.t('Restore points') })),
         h('p', { class: 'settings-desc', text: 'The newest backups that include this agent. Restoring puts every file in a backup back.' })),
       h('div', { class: 'set-stack agent-restore-list' }),
       h('a', { class: 'link agents-all-backups', href: F.hashFor('agents', '', { section: 'backups' }), text: 'All restore points' }));
@@ -1656,7 +1655,7 @@
   }
 
   F.views.agents = {
-    title: () => (st.d ? nameOf(st.d.id) : 'Agents'),
+    title: () => (st.d ? nameOf(st.d.id) : F.t('Agents')),
     live: false,
     mount,
     show,
@@ -1666,7 +1665,7 @@
       if (st.d) leaveDetail();
     },
     actions() {
-      const refresh = F.btn('Refresh', { icon: 'reload', title: 'Read the files again' });
+      const refresh = F.btn(F.t('Refresh'), { icon: 'reload', title: 'Read the files again' });
       refresh.addEventListener('click', async () => {
         if (refresh.getAttribute('aria-busy') === 'true') return;
         F.setPending(refresh, 'Refreshing…');
@@ -1674,7 +1673,7 @@
         try { await load(); } finally { F.clearPending(refresh); }
       });
       if (!st.d) return [refresh];
-      return [F.btn('All agents', { kind: 'ghost', icon: 'chevron-left', onclick: () => F.navigate('agents') }), refresh];
+      return [F.btn(F.t('All agents'), { kind: 'ghost', icon: 'chevron-left', onclick: () => F.navigate('agents') }), refresh];
     },
     onKey,
     onEscape,
